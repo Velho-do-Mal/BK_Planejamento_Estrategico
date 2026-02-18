@@ -1,8 +1,0 @@
-streamlit>=1.20.0
-pandas>=2.0.0
-plotly>=6.0.0
-openpyxl>=3.0.0
-SQLAlchemy>=1.4.0
-psycopg2-binary>=2.9.0
-kaleido>=1.0.0
-numpy>=1.23.0
