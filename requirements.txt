@@ -1,0 +1,11 @@
+streamlit>=1.30.0
+pandas>=2.0.0
+plotly>=5.18.0
+openpyxl>=3.1.0
+SQLAlchemy>=2.0.0
+psycopg2-binary>=2.9.0
+kaleido>=0.2.1
+numpy>=1.24.0
+fastapi>=0.110.0
+uvicorn>=0.27.0
+python-docx>=1.1.0

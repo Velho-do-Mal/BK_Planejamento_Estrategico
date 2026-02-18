@@ -1,0 +1,1829 @@
+# streamlit_app.py
+"""
+BK_Planejamento_Estrategico v2.0 — Layout e UX aprimorados
+- Dashboard executivo com KPIs
+- Tabelas 100% editáveis (estilo Excel) com st.data_editor
+- Gráficos modernos com Plotly (dark theme + cores BK)
+- SWOT visual 4-quadrantes
+- OKRs: previsto vs realizado, tendência, gauge de performance
+- Planos de Ação: kanban-style analytics + timeline
+- Relatório HTML moderno + exportação .docx integrada
+- Correções: build_example, StrategicInfo seguro, conn_str mascarada, typos
+"""
+
+import base64
+import io
+import json
+import os
+import zipfile
+import inspect
+from dataclasses import dataclass, asdict, field, fields
+from datetime import date, datetime
+from typing import List, Dict, Any, Optional
+
+import numpy as np
+import pandas as pd
+import plotly.graph_objs as go
+import plotly.express as px
+from plotly.subplots import make_subplots
+import streamlit as st
+from sqlalchemy import create_engine, text
+
+# ═══════════════════════════════════════════
+# PALETA BK — cores consistentes
+# ═══════════════════════════════════════════
+BK_BLUE      = "#1565C0"
+BK_BLUE_LIGHT= "#42A5F5"
+BK_TEAL      = "#00897B"
+BK_GREEN     = "#43A047"
+BK_ORANGE    = "#FB8C00"
+BK_RED       = "#E53935"
+BK_PURPLE    = "#7B1FA2"
+BK_GRAY      = "#546E7A"
+BK_BG        = "#F0F4F8"
+BK_CARD      = "#FFFFFF"
+BK_DARK      = "#0D1B2A"
+
+SWOT_COLORS = {
+    "Força":       "#43A047",
+    "Fraqueza":    "#E53935",
+    "Oportunidade":"#1565C0",
+    "Ameaça":      "#FB8C00",
+}
+STATUS_COLORS = {
+    "Concluído":   BK_GREEN,
+    "Em andamento":BK_ORANGE,
+    "Pendente":    BK_GRAY,
+    "Atrasado":    BK_RED,
+}
+
+# ═══════════════════════════════════════════
+# MODELOS DE DADOS
+# ═══════════════════════════════════════════
+
+@dataclass
+class Partner:
+    nome: str
+    cargo: str
+    email: str
+    telefone: str
+    observacoes: str = ""
+
+@dataclass
+class AreaResponsavel:
+    area: str
+    responsavel: str
+    email: str
+    observacoes: str = ""
+
+@dataclass
+class StrategicInfo:
+    visao: str = ""
+    missao: str = ""
+    valores: str = ""
+    proposta_valor: str = ""
+    posicionamento: str = ""
+    objetivos_estrategicos: str = ""
+    pilares: str = ""
+    publico_alvo: str = ""
+    diferenciais: str = ""
+    notas: str = ""
+
+@dataclass
+class SWOTItem:
+    tipo: str
+    descricao: str
+    prioridade: str
+
+@dataclass
+class OKRMonthData:
+    ano: int
+    mes: int
+    previsto: float = 0.0
+    realizado: float = 0.0
+
+@dataclass
+class OKR:
+    nome: str
+    area: str
+    unidade: str
+    descricao: str = ""
+    inicio_ano: int = field(default_factory=lambda: date.today().year)
+    inicio_mes: int = field(default_factory=lambda: date.today().month)
+    meses: List[OKRMonthData] = field(default_factory=list)
+
+    def __post_init__(self):
+        if not self.meses:
+            ano, mes = self.inicio_ano, self.inicio_mes
+            for _ in range(36):
+                self.meses.append(OKRMonthData(ano=ano, mes=mes))
+                mes += 1
+                if mes > 12:
+                    mes = 1
+                    ano += 1
+
+@dataclass
+class PlanoAcao:
+    titulo: str
+    area: str
+    responsavel: str
+    descricao: str
+    data_inicio: str
+    data_vencimento: str
+    status: str = "Pendente"
+    observacoes: str = ""
+
+@dataclass
+class PlanningData:
+    strategic: StrategicInfo = field(default_factory=StrategicInfo)
+    partners: List[Partner] = field(default_factory=list)
+    areas: List[AreaResponsavel] = field(default_factory=list)
+    swot: List[SWOTItem] = field(default_factory=list)
+    okrs: List[OKR] = field(default_factory=list)
+    actions: List[PlanoAcao] = field(default_factory=list)
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "strategic": asdict(self.strategic),
+            "partners": [asdict(p) for p in self.partners],
+            "areas": [asdict(a) for a in self.areas],
+            "swot": [asdict(s) for s in self.swot],
+            "okrs": [
+                {**{k: v for k, v in asdict(o).items() if k != "meses"},
+                 "meses": [asdict(m) for m in o.meses]}
+                for o in self.okrs
+            ],
+            "actions": [asdict(ac) for ac in self.actions],
+        }
+
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> "PlanningData":
+        pd_obj = cls()
+        # StrategicInfo seguro contra chaves extras
+        try:
+            known = {f.name for f in fields(StrategicInfo)}
+            safe = {k: v for k, v in data.get("strategic", {}).items() if k in known}
+            pd_obj.strategic = StrategicInfo(**safe)
+        except Exception:
+            pd_obj.strategic = StrategicInfo()
+
+        for p in data.get("partners", []):
+            try: pd_obj.partners.append(Partner(**p))
+            except Exception: pass
+
+        for a in data.get("areas", []):
+            try: pd_obj.areas.append(AreaResponsavel(**a))
+            except Exception: pass
+
+        for s in data.get("swot", []):
+            try: pd_obj.swot.append(SWOTItem(**s))
+            except Exception: pass
+
+        for o in data.get("okrs", []):
+            try:
+                meses = [OKRMonthData(**m) for m in o.get("meses", [])]
+                o_copy = {k: v for k, v in o.items() if k != "meses"}
+                okr = OKR(**o_copy)
+                if meses:
+                    okr.meses = meses
+                if len(okr.meses) != 36:
+                    existing = {(int(m.ano), int(m.mes)): m for m in okr.meses}
+                    okr.meses = []
+                    ano, mes = int(okr.inicio_ano), int(okr.inicio_mes)
+                    for _ in range(36):
+                        key = (ano, mes)
+                        if key in existing:
+                            mm = existing[key]
+                            okr.meses.append(OKRMonthData(ano=ano, mes=mes, previsto=float(mm.previsto), realizado=float(mm.realizado)))
+                        else:
+                            okr.meses.append(OKRMonthData(ano=ano, mes=mes))
+                        mes += 1
+                        if mes > 12: mes, ano = 1, ano + 1
+                pd_obj.okrs.append(okr)
+            except Exception:
+                pass
+
+        for ac in data.get("actions", []):
+            try:
+                if "data_inicio" not in ac:
+                    ac = {**ac, "data_inicio": ac.get("data_vencimento", date.today().strftime("%Y-%m-%d"))}
+                pd_obj.actions.append(PlanoAcao(**ac))
+            except Exception:
+                try:
+                    pd_obj.actions.append(PlanoAcao(
+                        titulo=ac.get("titulo",""), area=ac.get("area",""),
+                        responsavel=ac.get("responsavel",""), descricao=ac.get("descricao",""),
+                        data_inicio=ac.get("data_inicio", date.today().strftime("%Y-%m-%d")),
+                        data_vencimento=ac.get("data_vencimento", date.today().strftime("%Y-%m-%d")),
+                        status=ac.get("status","Pendente"), observacoes=ac.get("observacoes","")
+                    ))
+                except Exception:
+                    pass
+        return pd_obj
+
+
+def build_example() -> "PlanningData":
+    """Dados de exemplo para demonstração."""
+    return PlanningData()
+
+
+# ═══════════════════════════════════════════
+# UTILITÁRIOS DE DADOS / EXPORT
+# ═══════════════════════════════════════════
+
+def okr_to_dataframe(okr: OKR) -> pd.DataFrame:
+    rows = []
+    for i, m in enumerate(okr.meses, start=1):
+        rows.append({"m_index": i, "ano": m.ano, "mes": m.mes,
+                     "previsto": m.previsto, "realizado": m.realizado})
+    return pd.DataFrame(rows)
+
+def planning_to_dataframes(planning: PlanningData) -> Dict[str, pd.DataFrame]:
+    df_partners = pd.DataFrame([asdict(p) for p in planning.partners]) if planning.partners else pd.DataFrame(columns=["nome","cargo","email","telefone","observacoes"])
+    df_areas = pd.DataFrame([asdict(a) for a in planning.areas]) if planning.areas else pd.DataFrame(columns=["area","responsavel","email","observacoes"])
+    df_swot = pd.DataFrame([asdict(s) for s in planning.swot]) if planning.swot else pd.DataFrame(columns=["tipo","descricao","prioridade"])
+    okr_rows, okrmes_rows = [], []
+    for idx, o in enumerate(planning.okrs, start=1):
+        okr_rows.append({"okr_id": idx, "nome": o.nome, "area": o.area, "unidade": o.unidade,
+                         "descricao": o.descricao, "inicio_ano": o.inicio_ano, "inicio_mes": o.inicio_mes})
+        for i, m in enumerate(o.meses, start=1):
+            okrmes_rows.append({"okr_id": idx, "idx_mes": i, "ano": m.ano, "mes": m.mes,
+                                 "previsto": m.previsto, "realizado": m.realizado})
+    df_okr = pd.DataFrame(okr_rows) if okr_rows else pd.DataFrame(columns=["okr_id","nome","area","unidade","descricao","inicio_ano","inicio_mes"])
+    df_okr_mes = pd.DataFrame(okrmes_rows) if okrmes_rows else pd.DataFrame(columns=["okr_id","idx_mes","ano","mes","previsto","realizado"])
+    df_actions = pd.DataFrame([asdict(a) for a in planning.actions]) if planning.actions else pd.DataFrame(columns=["titulo","area","responsavel","descricao","data_inicio","data_vencimento","status","observacoes"])
+    return {"partners": df_partners, "areas": df_areas, "swot": df_swot,
+            "okrs": df_okr, "okr_mes": df_okr_mes, "actions": df_actions}
+
+def export_to_csv_zip(planning: PlanningData) -> bytes:
+    dfs = planning_to_dataframes(planning)
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w") as zf:
+        for name, df in dfs.items():
+            df_out = df.copy()
+            for c in df_out.columns:
+                if pd.api.types.is_datetime64_any_dtype(df_out[c]):
+                    df_out[c] = df_out[c].dt.strftime("%Y-%m-%d")
+            zf.writestr(f"{name}.csv", df_out.to_csv(index=False).encode("utf-8"))
+    buf.seek(0)
+    return buf.read()
+
+def export_to_excel_bytes(planning: PlanningData) -> bytes:
+    dfs = planning_to_dataframes(planning)
+    buf = io.BytesIO()
+    with pd.ExcelWriter(buf, engine="openpyxl") as writer:
+        for name, df in dfs.items():
+            try:
+                df_out = df.copy()
+                for c in df_out.columns:
+                    if pd.api.types.is_datetime64_any_dtype(df_out[c]):
+                        df_out[c] = df_out[c].dt.strftime("%Y-%m-%d")
+                df_out.to_excel(writer, sheet_name=name[:31], index=False)
+            except Exception:
+                pd.DataFrame().to_excel(writer, sheet_name=name[:31], index=False)
+    buf.seek(0)
+    return buf.read()
+
+def export_to_postgres(planning: PlanningData, conn_str: str = "") -> str:
+    if not conn_str:
+        conn_str = os.environ.get("NEON_DATABASE_URL", "")
+        try:
+            if hasattr(st, "secrets"):
+                neon_secret = st.secrets.get("neon", {}).get("connection")
+                if neon_secret:
+                    conn_str = neon_secret
+        except Exception:
+            pass
+    if not conn_str:
+        return "Connection string vazia. Configure NEON_DATABASE_URL ou st.secrets['neon']['connection']."
+    try:
+        engine = create_engine(conn_str, future=True)
+    except Exception as e:
+        return f"Erro ao criar engine: {e}"
+
+    ddl_statements = [
+        """CREATE TABLE IF NOT EXISTS partners (id SERIAL PRIMARY KEY, nome TEXT NOT NULL,
+           cargo TEXT, email TEXT, telefone TEXT, observacoes TEXT, UNIQUE (nome, email));""",
+        """CREATE TABLE IF NOT EXISTS areas (id SERIAL PRIMARY KEY, area TEXT NOT NULL,
+           responsavel TEXT, email TEXT, observacoes TEXT, UNIQUE (area));""",
+        """CREATE TABLE IF NOT EXISTS swot (id SERIAL PRIMARY KEY, tipo TEXT NOT NULL,
+           descricao TEXT NOT NULL, prioridade TEXT NOT NULL, UNIQUE (tipo, descricao));""",
+        """CREATE TABLE IF NOT EXISTS okr (id SERIAL PRIMARY KEY, nome TEXT NOT NULL,
+           area TEXT, unidade TEXT, descricao TEXT, inicio_ano INTEGER, inicio_mes INTEGER, UNIQUE (nome));""",
+        """CREATE TABLE IF NOT EXISTS okr_mes (id SERIAL PRIMARY KEY,
+           okr_id INTEGER NOT NULL REFERENCES okr(id) ON DELETE CASCADE,
+           idx_mes INTEGER NOT NULL, ano INTEGER NOT NULL, mes INTEGER NOT NULL,
+           previsto DOUBLE PRECISION NOT NULL, realizado DOUBLE PRECISION NOT NULL, UNIQUE (okr_id, idx_mes));""",
+        """CREATE TABLE IF NOT EXISTS actions (id SERIAL PRIMARY KEY, titulo TEXT NOT NULL,
+           area TEXT, responsavel TEXT, descricao TEXT, data_inicio DATE, data_vencimento DATE,
+           status TEXT NOT NULL, observacoes TEXT, UNIQUE (titulo, data_vencimento));""",
+    ]
+    try:
+        with engine.begin() as conn:
+            for ddl in ddl_statements:
+                conn.execute(text(ddl))
+            for p in planning.partners:
+                conn.execute(text("""INSERT INTO partners (nome,cargo,email,telefone,observacoes)
+                    VALUES (:nome,:cargo,:email,:telefone,:observacoes)
+                    ON CONFLICT (nome, email) DO UPDATE SET cargo=EXCLUDED.cargo,
+                    telefone=EXCLUDED.telefone, observacoes=EXCLUDED.observacoes"""),
+                    {"nome":p.nome,"cargo":p.cargo,"email":p.email,"telefone":p.telefone,"observacoes":p.observacoes})
+            for a in planning.areas:
+                conn.execute(text("""INSERT INTO areas (area,responsavel,email,observacoes)
+                    VALUES (:area,:responsavel,:email,:observacoes)
+                    ON CONFLICT (area) DO UPDATE SET responsavel=EXCLUDED.responsavel,
+                    email=EXCLUDED.email, observacoes=EXCLUDED.observacoes"""),
+                    {"area":a.area,"responsavel":a.responsavel,"email":a.email,"observacoes":a.observacoes})
+            for s in planning.swot:
+                conn.execute(text("""INSERT INTO swot (tipo,descricao,prioridade)
+                    VALUES (:tipo,:descricao,:prioridade)
+                    ON CONFLICT (tipo, descricao) DO UPDATE SET prioridade=EXCLUDED.prioridade"""),
+                    {"tipo":s.tipo,"descricao":s.descricao,"prioridade":s.prioridade})
+            for o in planning.okrs:
+                res = conn.execute(text("""INSERT INTO okr (nome,area,unidade,descricao,inicio_ano,inicio_mes)
+                    VALUES (:nome,:area,:unidade,:descricao,:inicio_ano,:inicio_mes)
+                    ON CONFLICT (nome) DO UPDATE SET area=EXCLUDED.area, unidade=EXCLUDED.unidade,
+                    descricao=EXCLUDED.descricao, inicio_ano=EXCLUDED.inicio_ano, inicio_mes=EXCLUDED.inicio_mes
+                    RETURNING id"""),
+                    {"nome":o.nome,"area":o.area,"unidade":o.unidade,"descricao":o.descricao,
+                     "inicio_ano":o.inicio_ano,"inicio_mes":o.inicio_mes})
+                row = res.fetchone()
+                okr_id = row[0] if row else None
+                if not okr_id:
+                    r2 = conn.execute(text("SELECT id FROM okr WHERE nome=:nome"), {"nome":o.nome})
+                    row2 = r2.fetchone()
+                    okr_id = row2[0] if row2 else None
+                if okr_id:
+                    for idx, m in enumerate(o.meses, start=1):
+                        conn.execute(text("""INSERT INTO okr_mes (okr_id,idx_mes,ano,mes,previsto,realizado)
+                            VALUES (:okr_id,:idx_mes,:ano,:mes,:previsto,:realizado)
+                            ON CONFLICT (okr_id,idx_mes) DO UPDATE SET ano=EXCLUDED.ano, mes=EXCLUDED.mes,
+                            previsto=EXCLUDED.previsto, realizado=EXCLUDED.realizado"""),
+                            {"okr_id":okr_id,"idx_mes":idx,"ano":m.ano,"mes":m.mes,
+                             "previsto":m.previsto,"realizado":m.realizado})
+            for ac in planning.actions:
+                try: data_v = datetime.strptime(ac.data_vencimento, "%Y-%m-%d").date(); dv = ac.data_vencimento
+                except Exception: dv = None
+                if dv is None: continue
+                conn.execute(text("""INSERT INTO actions (titulo,area,responsavel,descricao,data_inicio,data_vencimento,status,observacoes)
+                    VALUES (:titulo,:area,:responsavel,:descricao,:data_inicio,:data_vencimento,:status,:observacoes)
+                    ON CONFLICT (titulo,data_vencimento) DO UPDATE SET area=EXCLUDED.area,
+                    responsavel=EXCLUDED.responsavel, descricao=EXCLUDED.descricao,
+                    status=EXCLUDED.status, observacoes=EXCLUDED.observacoes"""),
+                    {"titulo":ac.titulo,"area":ac.area,"responsavel":ac.responsavel,"descricao":ac.descricao,
+                     "data_inicio":getattr(ac,"data_inicio",None),"data_vencimento":dv,
+                     "status":ac.status,"observacoes":ac.observacoes})
+        return "✅ Exportação para PostgreSQL (Neon) concluída com sucesso (UPSERT)."
+    except Exception as e:
+        return f"❌ Erro durante exportação para Postgres: {e}"
+
+
+# ═══════════════════════════════════════════
+# WRAPPER data_editor — compatibilidade
+# ═══════════════════════════════════════════
+
+def try_data_editor(df: pd.DataFrame, key: Optional[str] = None,
+                    height: Optional[int] = None, column_config=None, **kwargs) -> Optional[pd.DataFrame]:
+    if height is not None: kwargs.setdefault("height", height)
+    if column_config is not None: kwargs.setdefault("column_config", column_config)
+    editor_fn = getattr(st, "data_editor", None) or getattr(st, "experimental_data_editor", None)
+    if editor_fn is None:
+        st.dataframe(df)
+        return df
+    call_kwargs = dict(kwargs)
+    if key is not None: call_kwargs["key"] = key
+    try:
+        sig = inspect.signature(editor_fn)
+        allowed = set(sig.parameters.keys())
+        call_kwargs = {k: v for k, v in call_kwargs.items() if k in allowed}
+    except Exception:
+        pass
+    try:
+        return editor_fn(df, **call_kwargs)
+    except TypeError:
+        call_kwargs.pop("key", None)
+        try: return editor_fn(df, **call_kwargs)
+        except Exception: st.dataframe(df); return df
+    except Exception:
+        st.dataframe(df); return df
+
+
+# ═══════════════════════════════════════════
+# HELPERS GRÁFICOS
+# ═══════════════════════════════════════════
+
+PLOTLY_TEMPLATE = "plotly_white"
+
+def _fig_layout(fig, title="", height=380, xangle=-30):
+    fig.update_layout(
+        title=dict(text=title, font=dict(size=15, color=BK_DARK, family="Segoe UI")),
+        template=PLOTLY_TEMPLATE,
+        height=height,
+        margin=dict(l=30, r=30, t=50, b=50),
+        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
+        plot_bgcolor="rgba(0,0,0,0)",
+        paper_bgcolor="rgba(0,0,0,0)",
+        font=dict(family="Segoe UI", color=BK_DARK),
+    )
+    if xangle:
+        fig.update_xaxes(tickangle=xangle, gridcolor="#E0E7EF", showgrid=True)
+    fig.update_yaxes(gridcolor="#E0E7EF", showgrid=True, zeroline=False)
+    return fig
+
+def fig_okr_monthly(okr: OKR) -> go.Figure:
+    labels = _month_labels_for_okr(okr)
+    prev  = [float(okr.meses[k].previsto)  if k < len(okr.meses) else 0.0 for k in range(36)]
+    real  = [float(okr.meses[k].realizado) if k < len(okr.meses) else 0.0 for k in range(36)]
+    diff  = [r - p for r, p in zip(real, prev)]
+
+    fig = make_subplots(
+        rows=2, cols=1, shared_xaxes=True,
+        row_heights=[0.7, 0.3],
+        vertical_spacing=0.08,
+        subplot_titles=[f"{okr.nome} — Previsto vs Realizado", "Diferença mensal"]
+    )
+    fig.add_trace(go.Bar(x=labels, y=prev, name="Previsto", marker_color=BK_BLUE_LIGHT, opacity=0.85), row=1, col=1)
+    fig.add_trace(go.Bar(x=labels, y=real, name="Realizado", marker_color=BK_TEAL, opacity=0.9), row=1, col=1)
+
+    y = np.array(real)
+    x = np.arange(36)
+    if np.count_nonzero(y) >= 3:
+        z = np.polyfit(x, y, 1)
+        trend = np.poly1d(z)(x).tolist()
+        fig.add_trace(go.Scatter(x=labels, y=trend, mode="lines", name="Tendência",
+                                 line=dict(color=BK_ORANGE, dash="dash", width=2)), row=1, col=1)
+
+    colors = [BK_GREEN if d >= 0 else BK_RED for d in diff]
+    fig.add_trace(go.Bar(x=labels, y=diff, name="Diferença", marker_color=colors, showlegend=False), row=2, col=1)
+
+    fig.update_layout(
+        barmode="group", height=520, template=PLOTLY_TEMPLATE,
+        margin=dict(l=30, r=30, t=70, b=50), font=dict(family="Segoe UI", color=BK_DARK),
+        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
+        plot_bgcolor="rgba(0,0,0,0)", paper_bgcolor="rgba(0,0,0,0)",
+    )
+    fig.update_xaxes(tickangle=-45, gridcolor="#E0E7EF", row=2, col=1)
+    fig.update_xaxes(gridcolor="#E0E7EF", row=1, col=1)
+    fig.update_yaxes(gridcolor="#E0E7EF", zeroline=True, zerolinecolor="#ccc")
+    return fig
+
+def fig_okr_cumulative(okr: OKR) -> go.Figure:
+    labels = _month_labels_for_okr(okr)
+    prev = [float(okr.meses[k].previsto) if k < len(okr.meses) else 0.0 for k in range(36)]
+    real = [float(okr.meses[k].realizado) if k < len(okr.meses) else 0.0 for k in range(36)]
+    cum_p = np.cumsum(prev).tolist()
+    cum_r = np.cumsum(real).tolist()
+
+    fig = go.Figure()
+    fig.add_trace(go.Scatter(x=labels, y=cum_p, mode="lines", name="Acum. Planejado",
+                             line=dict(color=BK_BLUE_LIGHT, width=2, dash="dot"),
+                             fill="tozeroy", fillcolor="rgba(66,165,245,0.08)"))
+    fig.add_trace(go.Scatter(x=labels, y=cum_r, mode="lines+markers", name="Acum. Realizado",
+                             line=dict(color=BK_TEAL, width=2.5),
+                             fill="tozeroy", fillcolor="rgba(0,137,123,0.1)"))
+    return _fig_layout(fig, "Acumulado 36 meses", height=360)
+
+def fig_okr_gauge(okr: OKR) -> go.Figure:
+    prev_total = sum(m.previsto for m in okr.meses)
+    real_total = sum(m.realizado for m in okr.meses)
+    pct = (real_total / prev_total * 100) if prev_total > 0 else 0.0
+    color = BK_GREEN if pct >= 95 else (BK_ORANGE if pct >= 70 else BK_RED)
+    fig = go.Figure(go.Indicator(
+        mode="gauge+number+delta",
+        value=pct,
+        number={"suffix": "%", "font": {"size": 32, "family": "Segoe UI", "color": BK_DARK}},
+        delta={"reference": 100, "valueformat": ".1f"},
+        gauge={
+            "axis": {"range": [0, 130], "tickwidth": 1, "tickcolor": BK_GRAY},
+            "bar": {"color": color, "thickness": 0.35},
+            "bgcolor": "white",
+            "steps": [
+                {"range": [0, 70],   "color": "rgba(229,57,53,0.08)"},
+                {"range": [70, 95],  "color": "rgba(251,140,0,0.08)"},
+                {"range": [95, 130], "color": "rgba(67,160,71,0.08)"},
+            ],
+            "threshold": {"line": {"color": BK_BLUE, "width": 3}, "thickness": 0.75, "value": 100},
+        },
+        title={"text": f"<b>% Realização</b><br><span style='font-size:11px'>{okr.nome[:40]}</span>",
+               "font": {"family": "Segoe UI", "size": 13}},
+    ))
+    fig.update_layout(height=260, margin=dict(l=20, r=20, t=40, b=10),
+                      paper_bgcolor="rgba(0,0,0,0)")
+    return fig
+
+def fig_swot_quadrant(swot_items: List[SWOTItem]) -> go.Figure:
+    quadrants = {"Força": (1, 1), "Fraqueza": (-1, 1), "Oportunidade": (1, -1), "Ameaça": (-1, -1)}
+    quad_labels = {"Força": "FORÇAS", "Fraqueza": "FRAQUEZAS", "Oportunidade": "OPORTUNIDADES", "Ameaça": "AMEAÇAS"}
+    priority_size = {"Alta": 20, "Média": 14, "Baixa": 10}
+
+    fig = go.Figure()
+    # Fundo dos quadrantes
+    for tipo, (qx, qy) in quadrants.items():
+        fig.add_shape(type="rect",
+            x0=0 if qx > 0 else -1, y0=0 if qy > 0 else -1,
+            x1=1 if qx > 0 else 0, y1=1 if qy > 0 else 0,
+            fillcolor=SWOT_COLORS[tipo], opacity=0.06, line_width=0)
+        fig.add_annotation(x=0.5*qx, y=0.88*qy, text=f"<b>{quad_labels[tipo]}</b>",
+            showarrow=False, font=dict(size=12, color=SWOT_COLORS[tipo], family="Segoe UI"),
+            xref="x", yref="y")
+
+    # Contadores por tipo para posicionamento
+    tipo_counter: Dict[str, int] = {}
+    for item in swot_items:
+        t = item.tipo
+        if t not in quadrants: continue
+        qx, qy = quadrants[t]
+        n = tipo_counter.get(t, 0)
+        tipo_counter[t] = n + 1
+        col = n % 2
+        row = n // 2
+        x = qx * (0.2 + col * 0.35)
+        y = qy * (0.65 - row * 0.28)
+        size = priority_size.get(item.prioridade, 14)
+        fig.add_trace(go.Scatter(
+            x=[x], y=[y], mode="markers+text",
+            marker=dict(size=size, color=SWOT_COLORS[t], opacity=0.85,
+                        line=dict(width=1.5, color="white")),
+            text=[item.descricao[:28] + ("…" if len(item.descricao) > 28 else "")],
+            textposition="bottom center",
+            textfont=dict(size=9, family="Segoe UI"),
+            hovertext=f"<b>{item.tipo}</b> [{item.prioridade}]<br>{item.descricao}",
+            hoverinfo="text",
+            name=item.tipo,
+            showlegend=False,
+        ))
+
+    # Linhas centrais
+    fig.add_shape(type="line", x0=0, y0=-1, x1=0, y1=1, line=dict(color="#9E9E9E", width=1.5, dash="dot"))
+    fig.add_shape(type="line", x0=-1, y0=0, x1=1, y1=0, line=dict(color="#9E9E9E", width=1.5, dash="dot"))
+
+    fig.update_layout(
+        xaxis=dict(range=[-1, 1], showgrid=False, zeroline=False, showticklabels=False),
+        yaxis=dict(range=[-1, 1], showgrid=False, zeroline=False, showticklabels=False),
+        height=480, template="plotly_white",
+        margin=dict(l=10, r=10, t=50, b=10),
+        paper_bgcolor="rgba(0,0,0,0)",
+        plot_bgcolor="rgba(245,248,252,1)",
+        title=dict(text="Matriz SWOT", font=dict(size=15, color=BK_DARK, family="Segoe UI")),
+    )
+    return fig
+
+def fig_actions_status(planning: PlanningData) -> go.Figure:
+    today = date.today()
+    counts = {"Concluído": 0, "Em andamento": 0, "Pendente": 0, "Atrasado": 0}
+    for a in planning.actions:
+        if a.status == "Concluído":
+            counts["Concluído"] += 1
+        else:
+            try:
+                dv = datetime.strptime(a.data_vencimento, "%Y-%m-%d").date()
+                if dv < today:
+                    counts["Atrasado"] += 1
+                elif a.status == "Em andamento":
+                    counts["Em andamento"] += 1
+                else:
+                    counts["Pendente"] += 1
+            except Exception:
+                counts[a.status] = counts.get(a.status, 0) + 1
+
+    labels = [k for k, v in counts.items() if v > 0]
+    values = [counts[k] for k in labels]
+    colors = [STATUS_COLORS[k] for k in labels]
+
+    fig = go.Figure(go.Pie(
+        labels=labels, values=values,
+        marker=dict(colors=colors, line=dict(color="white", width=2)),
+        hole=0.55,
+        textfont=dict(family="Segoe UI", size=12),
+        hovertemplate="<b>%{label}</b><br>%{value} planos<br>%{percent}<extra></extra>",
+    ))
+    total = sum(values)
+    fig.add_annotation(text=f"<b>{total}</b><br>total", x=0.5, y=0.5,
+                       showarrow=False, font=dict(size=14, family="Segoe UI", color=BK_DARK))
+    return _fig_layout(fig, "Status dos Planos de Ação", height=320, xangle=0)
+
+def fig_actions_timeline(planning: PlanningData) -> go.Figure:
+    if not planning.actions:
+        return go.Figure()
+    today = date.today()
+    rows = []
+    for a in planning.actions:
+        try:
+            d_ini = datetime.strptime(a.data_inicio, "%Y-%m-%d")
+            d_fim = datetime.strptime(a.data_vencimento, "%Y-%m-%d")
+        except Exception:
+            d_ini = d_fim = datetime.now()
+        status_eff = a.status
+        if a.status != "Concluído" and d_fim.date() < today:
+            status_eff = "Atrasado"
+        rows.append(dict(Task=a.titulo[:30], Start=d_ini, Finish=d_fim,
+                         Status=status_eff, Area=a.area, Responsavel=a.responsavel))
+    df_gantt = pd.DataFrame(rows).sort_values("Start")
+
+    fig = px.timeline(df_gantt, x_start="Start", x_end="Finish", y="Task",
+                      color="Status", color_discrete_map=STATUS_COLORS,
+                      hover_data={"Area": True, "Responsavel": True},
+                      labels={"Task": "Plano", "Status": "Status"})
+    hoje_str = datetime.now().strftime("%Y-%m-%d")
+    fig.add_shape(type="line", x0=hoje_str, x1=hoje_str, y0=0, y1=1,
+                  xref="x", yref="paper",
+                  line=dict(color=BK_RED, width=2, dash="dash"))
+    fig.add_annotation(x=hoje_str, y=1.02, xref="x", yref="paper",
+                       text="<b>Hoje</b>", showarrow=False,
+                       font=dict(color=BK_RED, size=11, family="Segoe UI"),
+                       bgcolor="white", bordercolor=BK_RED, borderwidth=1)
+    fig.update_yaxes(autorange="reversed", tickfont=dict(size=10))
+    return _fig_layout(fig, "Linha do Tempo (Gantt)", height=max(300, len(rows) * 32 + 80), xangle=-30)
+
+def fig_okrs_overview(planning: PlanningData) -> go.Figure:
+    if not planning.okrs:
+        return go.Figure()
+    names, totals_prev, totals_real, pcts = [], [], [], []
+    for o in planning.okrs:
+        tp = sum(m.previsto for m in o.meses)
+        tr = sum(m.realizado for m in o.meses)
+        names.append(o.nome[:25])
+        totals_prev.append(tp)
+        totals_real.append(tr)
+        pcts.append((tr / tp * 100) if tp > 0 else 0.0)
+
+    fig = make_subplots(specs=[[{"secondary_y": True}]])
+    fig.add_trace(go.Bar(x=names, y=totals_prev, name="Total Previsto",
+                         marker_color=BK_BLUE_LIGHT, opacity=0.8), secondary_y=False)
+    fig.add_trace(go.Bar(x=names, y=totals_real, name="Total Realizado",
+                         marker_color=BK_TEAL, opacity=0.9), secondary_y=False)
+    fig.add_trace(go.Scatter(x=names, y=pcts, mode="lines+markers+text",
+                             name="% Realização", text=[f"{p:.0f}%" for p in pcts],
+                             textposition="top center",
+                             line=dict(color=BK_ORANGE, width=2.5),
+                             marker=dict(size=8, color=BK_ORANGE)), secondary_y=True)
+
+    fig.update_layout(barmode="group", height=400, template=PLOTLY_TEMPLATE,
+                      font=dict(family="Segoe UI"), plot_bgcolor="rgba(0,0,0,0)",
+                      paper_bgcolor="rgba(0,0,0,0)",
+                      legend=dict(orientation="h", yanchor="bottom", y=1.02, x=0.5, xanchor="center"),
+                      margin=dict(l=30, r=30, t=60, b=60),
+                      title=dict(text="OKRs — Visão Consolidada 36 meses",
+                                 font=dict(size=15, color=BK_DARK)))
+    fig.update_yaxes(title_text="Valor (unidade OKR)", gridcolor="#E0E7EF", secondary_y=False)
+    fig.update_yaxes(title_text="% Realização", secondary_y=True)
+    fig.update_xaxes(tickangle=-15, gridcolor="#E0E7EF")
+    return fig
+
+
+# ═══════════════════════════════════════════
+# HELPERS OKR
+# ═══════════════════════════════════════════
+
+def _month_labels_for_okr(o: OKR) -> List[str]:
+    labels = []
+    ano = int(getattr(o, "inicio_ano", date.today().year) or date.today().year)
+    mes = int(getattr(o, "inicio_mes", date.today().month) or date.today().month)
+    for _ in range(36):
+        labels.append(f"{mes:02d}/{ano}")
+        mes += 1
+        if mes > 12: mes, ano = 1, ano + 1
+    return labels
+
+def _okr_meta_df(pl: PlanningData) -> pd.DataFrame:
+    rows = []
+    for i, o in enumerate(pl.okrs, start=1):
+        try: d0 = date(int(o.inicio_ano), int(o.inicio_mes), 1)
+        except Exception: d0 = date.today().replace(day=1)
+        rows.append({"okr_id": i, "OKR": o.nome, "Área": o.area,
+                     "Unidade": o.unidade or "Inteiro", "Descrição": o.descricao,
+                     "Início": d0, "Excluir": False})
+    df = pd.DataFrame(rows) if rows else pd.DataFrame(columns=["okr_id","OKR","Área","Unidade","Descrição","Início","Excluir"])
+    return df
+
+def _sync_okrs_from_meta(pl: PlanningData, df_meta: pd.DataFrame) -> None:
+    existing_by_id = {i+1: pl.okrs[i] for i in range(len(pl.okrs))}
+    new_okrs: List[OKR] = []
+    for _, r in df_meta.iterrows():
+        if bool(r.get("Excluir", False)): continue
+        nome = str(r.get("OKR","")).strip()
+        if not nome: continue
+        area = str(r.get("Área","")).strip()
+        unidade = str(r.get("Unidade","Inteiro")).strip()
+        desc = str(r.get("Descrição","")).strip()
+        inicio = r.get("Início", None)
+        if isinstance(inicio, (datetime, date)):
+            inicio_ano, inicio_mes = int(inicio.year), int(inicio.month)
+        else:
+            inicio_ano, inicio_mes = date.today().year, date.today().month
+        rid = r.get("okr_id", None)
+        try: rid = int(rid)
+        except Exception: rid = None
+        if rid in existing_by_id:
+            o = existing_by_id[rid]
+            o.nome = nome; o.area = area; o.unidade = unidade; o.descricao = desc
+            if (o.inicio_ano != inicio_ano) or (o.inicio_mes != inicio_mes):
+                prev_vals = [m.previsto for m in o.meses][:36]
+                real_vals = [m.realizado for m in o.meses][:36]
+                o.inicio_ano, o.inicio_mes = inicio_ano, inicio_mes
+                o.meses = []
+                o.__post_init__()
+                for k in range(min(36, len(o.meses))):
+                    o.meses[k].previsto = float(prev_vals[k]) if k < len(prev_vals) else 0.0
+                    o.meses[k].realizado = float(real_vals[k]) if k < len(real_vals) else 0.0
+            new_okrs.append(o)
+        else:
+            o = OKR(nome=nome, area=area, unidade=unidade, descricao=desc,
+                    inicio_ano=inicio_ano, inicio_mes=inicio_mes)
+            o.__post_init__()
+            new_okrs.append(o)
+    pl.okrs = new_okrs
+
+def _okr_wide_df(pl: PlanningData, kind: str) -> pd.DataFrame:
+    rows = []
+    for i, o in enumerate(pl.okrs, start=1):
+        r = {"OKR": o.nome, "okr_id": i, "Unidade": o.unidade or "Inteiro"}
+        for k in range(36):
+            col = f"M{k+1:02d}"
+            val = getattr(o.meses[k], kind) if k < len(o.meses) else 0.0
+            r[col] = float(val) if pd.notna(val) else 0.0
+        rows.append(r)
+    cols = ["OKR","okr_id","Unidade"] + [f"M{k+1:02d}" for k in range(36)]
+    return pd.DataFrame(rows, columns=cols) if rows else pd.DataFrame(columns=cols)
+
+def _apply_wide_to_okrs(pl: PlanningData, df_wide: pd.DataFrame, kind: str) -> None:
+    name_to_okr = {o.nome: o for o in pl.okrs}
+    for _, r in df_wide.iterrows():
+        okr_name = str(r.get("OKR","")).strip()
+        if okr_name not in name_to_okr: continue
+        o = name_to_okr[okr_name]
+        unit = (o.unidade or "Inteiro").strip()
+        for k in range(36):
+            col = f"M{k+1:02d}"
+            v = r.get(col, 0.0)
+            try: fv = float(v) if v != "" else 0.0
+            except Exception: fv = 0.0
+            if unit.lower().startswith("inte"): fv = int(round(fv))
+            if kind == "previsto": o.meses[k].previsto = fv
+            else: o.meses[k].realizado = fv
+
+
+# ═══════════════════════════════════════════
+# RELATÓRIO HTML
+# ═══════════════════════════════════════════
+
+def format_brl(value: float) -> str:
+    try:
+        v = float(value)
+        s = f"{v:,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
+        return f"R$ {s}"
+    except Exception:
+        return ""
+
+def generate_recommendations_for_okr(okr: OKR, df: pd.DataFrame) -> List[str]:
+    recs = []
+    if df.empty: return ["Dados insuficientes para recomendações."]
+    avg_prev = df['previsto'].mean() if not df['previsto'].isna().all() else 0
+    avg_real = df['realizado'].mean() if not df['realizado'].isna().all() else 0
+    if avg_prev == 0:
+        recs.append("Definir metas previstas (previsto=0 impede análise).")
+        return recs
+    pct = ((avg_real - avg_prev) / avg_prev) * 100
+    if pct < -10: recs.append("Realizado consistentemente abaixo do previsto (>10%). Revisar causas e replanejar.")
+    elif pct < 0: recs.append("Leve subperformance. Reforçar acompanhamento semanal.")
+    elif pct < 10: recs.append("Performance adequada. Padronizar processos e manter ritmo.")
+    else: recs.append("Realizado acima do previsto — validar sustentabilidade e ajustar metas upward.")
+    recs.append("Alinhar OKR com planos de ação e responsáveis com datas claras.")
+    return recs
+
+def suggest_okrs_from_data(planning: PlanningData, top_n: int = 5) -> List[str]:
+    ideas = []
+    areas = [a.area for a in planning.areas] if planning.areas else ["Comercial","Projetos Elétricos","Inovação e Tecnologia"]
+    if any("forç" in s.tipo.lower() or "oportun" in s.tipo.lower() for s in planning.swot):
+        ideas.append(f"Aumentar faturamento recorrente através de serviços de alto valor — Área: {areas[0]}")
+    ideas.append("Reduzir lead time de propostas para <48 horas — Área: Comercial")
+    ideas.append("Garantir 95% dos entregáveis no prazo em 12 meses — Área: Projetos Elétricos")
+    ideas.append("Automatizar 3 relatórios mensais com integração BIM/Python — Área: Inovação e Tecnologia")
+    ideas.append("Melhorar margem média por projeto em 5% até o fim do ano — Área: Comercial/Financeiro")
+    return ideas[:top_n]
+
+HTML_CSS = """
+<style>
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap');
+*{box-sizing:border-box;margin:0;padding:0;}
+body{font-family:'Inter',sans-serif;background:#F0F4F8;color:#1a202c;}
+.page-header{background:linear-gradient(135deg,#1565C0 0%,#00897B 100%);padding:36px 40px;color:#fff;}
+.page-header h1{font-size:26px;font-weight:700;letter-spacing:-0.5px;}
+.page-header p{font-size:13px;opacity:0.85;margin-top:6px;}
+.content{padding:28px 32px;}
+.card{background:#fff;border-radius:12px;padding:22px 26px;margin-bottom:20px;
+      box-shadow:0 2px 12px rgba(0,0,0,0.06);border:1px solid #e2e8f0;}
+.card h2{font-size:17px;font-weight:600;color:#1565C0;margin-bottom:14px;
+          padding-bottom:8px;border-bottom:2px solid #E3F2FD;}
+.card h3{font-size:14px;font-weight:600;color:#263238;margin:14px 0 6px;}
+table{width:100%;border-collapse:collapse;font-size:13px;margin-top:8px;}
+th{background:#E3F2FD;color:#1565C0;font-weight:600;padding:9px 12px;text-align:left;}
+td{padding:8px 12px;border-bottom:1px solid #f1f5f9;color:#374151;}
+tr:hover td{background:#f8fafc;}
+.badge{display:inline-block;padding:2px 10px;border-radius:20px;font-size:11px;font-weight:600;}
+.badge-alta{background:#FEE2E2;color:#DC2626;}
+.badge-media{background:#FEF3C7;color:#D97706;}
+.badge-baixa{background:#D1FAE5;color:#059669;}
+.badge-forca{background:#D1FAE5;color:#059669;}
+.badge-fraqueza{background:#FEE2E2;color:#DC2626;}
+.badge-oportunidade{background:#DBEAFE;color:#1D4ED8;}
+.badge-ameaca{background:#FEF3C7;color:#D97706;}
+.kpi-row{display:flex;gap:14px;flex-wrap:wrap;margin-bottom:18px;}
+.kpi{background:#F0F9FF;border:1px solid #BAE6FD;border-radius:10px;padding:14px 20px;
+     flex:1;min-width:140px;text-align:center;}
+.kpi-val{font-size:24px;font-weight:700;color:#0369A1;}
+.kpi-label{font-size:11px;color:#64748B;margin-top:2px;}
+.okr-chart{text-align:center;margin:16px 0;}
+.footer{text-align:center;padding:20px;font-size:12px;color:#94A3B8;
+        border-top:1px solid #e2e8f0;margin-top:20px;}
+.rec-item{background:#EFF6FF;border-left:3px solid #1565C0;padding:8px 14px;
+          border-radius:0 6px 6px 0;margin-bottom:6px;font-size:13px;}
+</style>
+"""
+
+def build_html_report(planning: PlanningData) -> str:
+    parts = [f"""<!DOCTYPE html><html lang="pt-br"><head><meta charset="utf-8">
+<title>Relatório BK — Planejamento Estratégico</title>{HTML_CSS}</head><body>
+<div class="page-header">
+  <h1>BK Engenharia e Tecnologia — Planejamento Estratégico (3 anos)</h1>
+  <p>Relatório gerado em {datetime.now().strftime('%d/%m/%Y às %H:%M')}</p>
+</div><div class="content">"""]
+
+    # KPIs executivos
+    total_prev = sum(m.previsto for o in planning.okrs for m in o.meses)
+    total_real = sum(m.realizado for o in planning.okrs for m in o.meses)
+    pct_geral = (total_real / total_prev * 100) if total_prev > 0 else 0
+    today = date.today()
+    atrasados = sum(1 for a in planning.actions
+                    if a.status != "Concluído"
+                    and _safe_date(a.data_vencimento) and _safe_date(a.data_vencimento) < today)
+    concluidos = sum(1 for a in planning.actions if a.status == "Concluído")
+
+    parts.append(f"""<div class="card">
+<h2>🎯 Painel Executivo</h2>
+<div class="kpi-row">
+  <div class="kpi"><div class="kpi-val">{len(planning.okrs)}</div><div class="kpi-label">OKRs ativos</div></div>
+  <div class="kpi"><div class="kpi-val">{len(planning.actions)}</div><div class="kpi-label">Planos de ação</div></div>
+  <div class="kpi"><div class="kpi-val">{concluidos}</div><div class="kpi-label">Planos concluídos</div></div>
+  <div class="kpi"><div class="kpi-val" style="color:{'#DC2626' if atrasados else '#059669'}">{atrasados}</div><div class="kpi-label">Planos atrasados</div></div>
+  <div class="kpi"><div class="kpi-val">{pct_geral:.1f}%</div><div class="kpi-label">Realização geral</div></div>
+</div></div>""")
+
+    # Estratégia
+    s = planning.strategic
+    if any([s.visao, s.missao, s.valores, s.pilares]):
+        parts.append(f"""<div class="card"><h2>🧭 Norte Estratégico</h2>
+<table><tr><th>Campo</th><th>Conteúdo</th></tr>
+{''.join(f'<tr><td><b>{label}</b></td><td>{val}</td></tr>' for label, val in [
+    ("Visão", s.visao), ("Missão", s.missao), ("Valores", s.valores),
+    ("Proposta de Valor", s.proposta_valor), ("Público-alvo", s.publico_alvo),
+    ("Pilares", s.pilares), ("Diferenciais", s.diferenciais),
+    ("Objetivos Estratégicos", s.objetivos_estrategicos)
+] if val)}
+</table></div>""")
+
+    # Sócios
+    if planning.partners:
+        parts.append('<div class="card"><h2>👥 Sócios</h2><table><tr><th>Nome</th><th>Cargo</th><th>E-mail</th><th>Telefone</th></tr>')
+        for p in planning.partners:
+            parts.append(f"<tr><td><b>{p.nome}</b></td><td>{p.cargo}</td><td>{p.email}</td><td>{p.telefone}</td></tr>")
+        parts.append("</table></div>")
+
+    # Áreas
+    if planning.areas:
+        parts.append('<div class="card"><h2>🏢 Áreas e Responsáveis</h2><table><tr><th>Área</th><th>Responsável</th><th>E-mail</th><th>Observações</th></tr>')
+        for a in planning.areas:
+            parts.append(f"<tr><td><b>{a.area}</b></td><td>{a.responsavel}</td><td>{a.email}</td><td>{a.observacoes}</td></tr>")
+        parts.append("</table></div>")
+
+    # SWOT
+    if planning.swot:
+        parts.append('<div class="card"><h2>⚖️ Análise SWOT</h2><table><tr><th>Tipo</th><th>Prioridade</th><th>Descrição</th></tr>')
+        for s in planning.swot:
+            badge_t = s.tipo.lower().replace("ç","c").replace("ã","a")
+            badge_p = s.prioridade.lower()
+            parts.append(f'<tr><td><span class="badge badge-{badge_t}">{s.tipo}</span></td>'
+                         f'<td><span class="badge badge-{badge_p}">{s.prioridade}</span></td>'
+                         f'<td>{s.descricao}</td></tr>')
+        parts.append("</table></div>")
+
+    # OKRs
+    if planning.okrs:
+        parts.append('<div class="card"><h2>📈 OKRs (36 meses)</h2>')
+        # Gráfico agregado
+        try:
+            fig_agg = fig_okrs_overview(planning)
+            img = fig_agg.to_image(format="png", width=1100, height=400)
+            parts.append(f'<div class="okr-chart"><img src="data:image/png;base64,{base64.b64encode(img).decode()}" style="max-width:100%"/></div>')
+        except Exception:
+            pass
+
+        for o in planning.okrs:
+            df = okr_to_dataframe(o)
+            tp = df['previsto'].sum(); tr = df['realizado'].sum()
+            pct_o = (tr / tp * 100) if tp > 0 else 0
+            parts.append(f'<h3>📊 {o.nome}</h3>')
+            parts.append(f'<p style="font-size:12px;color:#64748B">Área: <b>{o.area}</b> | Unidade: <b>{o.unidade}</b> | Início: <b>{o.inicio_mes:02d}/{o.inicio_ano}</b> | Realização: <b>{pct_o:.1f}%</b></p>')
+            if o.descricao: parts.append(f'<p style="margin:6px 0;font-size:13px">{o.descricao}</p>')
+            # Gráfico mensal
+            try:
+                fig_m = fig_okr_monthly(o)
+                img_m = fig_m.to_image(format="png", width=1100, height=520)
+                parts.append(f'<div class="okr-chart"><img src="data:image/png;base64,{base64.b64encode(img_m).decode()}" style="max-width:100%"/></div>')
+            except Exception:
+                pass
+            # Tabela mensal
+            parts.append('<table><tr><th>M#</th><th>Mês/Ano</th><th>Previsto</th><th>Realizado</th><th>Δ</th></tr>')
+            labels = _month_labels_for_okr(o)
+            for i, m in enumerate(o.meses):
+                vp = format_brl(m.previsto) if "R$" in (o.unidade or "") else f"{m.previsto:,.2f}"
+                vr = format_brl(m.realizado) if "R$" in (o.unidade or "") else f"{m.realizado:,.2f}"
+                delta = m.realizado - m.previsto
+                delta_str = f'+{delta:,.2f}' if delta >= 0 else f'{delta:,.2f}'
+                color = "#059669" if delta >= 0 else "#DC2626"
+                parts.append(f'<tr><td>{i+1}</td><td>{labels[i]}</td><td>{vp}</td><td>{vr}</td>'
+                              f'<td style="color:{color};font-weight:600">{delta_str}</td></tr>')
+            parts.append("</table>")
+            # Recomendações
+            recs = generate_recommendations_for_okr(o, df)
+            parts.append('<div style="margin-top:12px">')
+            for rec in recs:
+                parts.append(f'<div class="rec-item">💡 {rec}</div>')
+            parts.append("</div>")
+        parts.append("</div>")
+
+    # Planos de Ação
+    if planning.actions:
+        parts.append('<div class="card"><h2>✅ Planos de Ação</h2>')
+        try:
+            fig_st = fig_actions_status(planning)
+            img_st = fig_st.to_image(format="png", width=600, height=320)
+            parts.append(f'<div class="okr-chart"><img src="data:image/png;base64,{base64.b64encode(img_st).decode()}" style="max-width:60%"/></div>')
+        except Exception:
+            pass
+        parts.append('<table><tr><th>Título</th><th>Área</th><th>Responsável</th><th>Início</th><th>Vencimento</th><th>Status</th><th>Atraso</th></tr>')
+        for ac in planning.actions:
+            dv = _safe_date(ac.data_vencimento)
+            atraso = max(0, (today - dv).days) if (dv and ac.status != "Concluído" and dv < today) else 0
+            badge_s = {"Concluído":"#059669","Em andamento":"#D97706","Pendente":"#64748B"}.get(ac.status,"#64748B")
+            atraso_str = f'<span style="color:#DC2626;font-weight:600">{atraso}d</span>' if atraso > 0 else "—"
+            parts.append(f'<tr><td><b>{ac.titulo}</b></td><td>{ac.area}</td><td>{ac.responsavel}</td>'
+                         f'<td>{ac.data_inicio}</td><td>{ac.data_vencimento}</td>'
+                         f'<td><span style="color:{badge_s};font-weight:600">{ac.status}</span></td>'
+                         f'<td>{atraso_str}</td></tr>')
+        parts.append("</table></div>")
+
+    parts.append('<div class="footer">Produzido por BK Engenharia e Tecnologia</div>')
+    parts.append("</div></body></html>")
+    return "\n".join(parts)
+
+def _safe_date(s: str) -> Optional[date]:
+    try: return datetime.strptime(str(s), "%Y-%m-%d").date()
+    except Exception: return None
+
+def _actions_df(pl: PlanningData) -> pd.DataFrame:
+    rows = []
+    today = date.today()
+    for a in pl.actions:
+        dv = _safe_date(a.data_vencimento)
+        status_eff = a.status
+        if a.status != "Concluído" and dv and dv < today:
+            status_eff = "Atrasado"
+        rows.append({"Título": a.titulo, "Área": a.area, "Responsável": a.responsavel,
+                     "Descrição": a.descricao,
+                     "Início": a.data_inicio if hasattr(a, "data_inicio") else "",
+                     "Vencimento": a.data_vencimento, "Status": a.status,
+                     "Status Efetivo": status_eff, "Observações": a.observacoes, "Excluir": False})
+    cols = ["Título","Área","Responsável","Descrição","Início","Vencimento","Status","Status Efetivo","Observações","Excluir"]
+    return pd.DataFrame(rows, columns=cols) if rows else pd.DataFrame(columns=cols)
+
+def _sync_actions(pl: PlanningData, df: pd.DataFrame) -> None:
+    new_actions = []
+    for _, r in df.iterrows():
+        if bool(r.get("Excluir", False)): continue
+        titulo = str(r.get("Título","")).strip()
+        if not titulo: continue
+        inicio = str(r.get("Início","")).strip() or date.today().strftime("%Y-%m-%d")
+        venc = str(r.get("Vencimento","")).strip() or date.today().strftime("%Y-%m-%d")
+        new_actions.append(PlanoAcao(
+            titulo=titulo, area=str(r.get("Área","")).strip(),
+            responsavel=str(r.get("Responsável","")).strip(),
+            descricao=str(r.get("Descrição","")).strip(),
+            data_inicio=inicio, data_vencimento=venc,
+            status=str(r.get("Status","Pendente")).strip(),
+            observacoes=str(r.get("Observações","")).strip()
+        ))
+    pl.actions = new_actions
+
+
+# ═══════════════════════════════════════════
+# APP CONFIG & CSS GLOBAL
+# ═══════════════════════════════════════════
+
+st.set_page_config(
+    page_title="BK Planejamento Estratégico",
+    page_icon="📊",
+    layout="wide",
+    initial_sidebar_state="expanded"
+)
+
+st.markdown("""
+<style>
+/* Fonte e background global */
+html, body, [class*="css"] { font-family: 'Segoe UI', sans-serif; }
+.stApp { background: #F0F4F8; }
+
+/* Header hero */
+.bk-hero {
+    background: linear-gradient(135deg, #1565C0 0%, #00897B 100%);
+    padding: 24px 32px; border-radius: 12px; margin-bottom: 20px;
+    color: white; box-shadow: 0 4px 20px rgba(21,101,192,0.3);
+}
+.bk-hero h1 { font-size: 24px; font-weight: 700; margin: 0; letter-spacing: -0.5px; }
+.bk-hero p { font-size: 13px; opacity: 0.85; margin: 4px 0 0; }
+
+/* KPI cards */
+.kpi-card {
+    background: white; border-radius: 10px; padding: 16px 20px;
+    text-align: center; box-shadow: 0 2px 8px rgba(0,0,0,0.06);
+    border-top: 3px solid #1565C0;
+}
+.kpi-card .val { font-size: 28px; font-weight: 700; color: #1565C0; }
+.kpi-card .lbl { font-size: 11px; color: #64748B; margin-top: 2px; text-transform: uppercase; letter-spacing: 0.5px; }
+
+/* Section title */
+.section-title {
+    font-size: 15px; font-weight: 600; color: #1565C0;
+    padding: 6px 0 10px; border-bottom: 2px solid #E3F2FD; margin-bottom: 14px;
+}
+
+/* Tab styling */
+.stTabs [data-baseweb="tab-list"] { gap: 4px; }
+.stTabs [data-baseweb="tab"] { padding: 8px 18px; border-radius: 8px 8px 0 0; font-size: 13px; font-weight: 500; }
+
+/* Sidebar */
+[data-testid="stSidebar"] { background: #0D1B2A; }
+[data-testid="stSidebar"] * { color: #CBD5E1 !important; }
+[data-testid="stSidebar"] h2, [data-testid="stSidebar"] h3 { color: #93C5FD !important; }
+[data-testid="stSidebar"] .stButton>button { 
+    background: #1565C0; color: white !important; border: none;
+    border-radius: 6px; width: 100%; margin-bottom: 4px;
+}
+[data-testid="stSidebar"] .stButton>button:hover { background: #1976D2; }
+
+/* Botões primários */
+.stButton>button[kind="primary"] { background: #1565C0; border: none; }
+.stButton>button { border-radius: 6px; font-weight: 500; }
+
+/* Alertas e info */
+.stSuccess { background: #D1FAE5; border-color: #059669; }
+.stWarning { background: #FEF3C7; border-color: #D97706; }
+.stError   { background: #FEE2E2; border-color: #DC2626; }
+
+/* DataEditor */
+[data-testid="stDataEditor"] { border-radius: 8px; overflow: hidden; }
+
+/* ── Campos de texto / textarea com borda visível ── */
+div[data-baseweb="input"] > div,
+div[data-baseweb="textarea"] > div {
+    background-color: #FFFFFF !important;
+    border: 1.5px solid #90A4AE !important;
+    border-radius: 6px !important;
+}
+div[data-baseweb="input"] > div:focus-within,
+div[data-baseweb="textarea"] > div:focus-within {
+    border-color: #1565C0 !important;
+    box-shadow: 0 0 0 2px rgba(21,101,192,0.15) !important;
+}
+div[data-baseweb="input"] input,
+div[data-baseweb="textarea"] textarea {
+    color: #1a202c !important;
+    background-color: #FFFFFF !important;
+    font-size: 14px !important;
+}
+/* Label dos campos */
+div[data-testid="stTextInput"] label,
+div[data-testid="stTextArea"] label,
+div[data-testid="stSelectbox"] label,
+div[data-testid="stNumberInput"] label {
+    color: #1E3A5F !important;
+    font-weight: 600 !important;
+    font-size: 13px !important;
+}
+/* Selectbox */
+div[data-baseweb="select"] > div:first-child {
+    background-color: #FFFFFF !important;
+    border: 1.5px solid #90A4AE !important;
+    border-radius: 6px !important;
+}
+/* Password input */
+div[data-baseweb="input"][type="password"] > div {
+    background-color: #FFFFFF !important;
+    border: 1.5px solid #90A4AE !important;
+}
+/* Expander header */
+details summary {
+    background: #EBF3FB !important;
+    border-radius: 6px;
+    padding: 4px 8px;
+}
+</style>
+""", unsafe_allow_html=True)
+
+
+# ═══════════════════════════════════════════
+# LOAD STATE
+# ═══════════════════════════════════════════
+
+if "planning" not in st.session_state:
+    if os.path.exists("planning.json"):
+        try:
+            with open("planning.json", "r", encoding="utf-8") as f:
+                data = json.load(f)
+            st.session_state.planning = PlanningData.from_dict(data)
+        except Exception:
+            st.session_state.planning = PlanningData()
+    else:
+        st.session_state.planning = PlanningData()
+
+planning: PlanningData = st.session_state.planning
+
+def save_planning(pl: PlanningData):
+    st.session_state.planning = pl
+
+
+# ═══════════════════════════════════════════
+# HEADER
+# ═══════════════════════════════════════════
+
+st.markdown("""
+<div class="bk-hero">
+    <h1>📊 BK Planejamento Estratégico</h1>
+    <p>Planejamento Estratégico 36 meses — BK Engenharia e Tecnologia</p>
+</div>
+""", unsafe_allow_html=True)
+
+
+# ═══════════════════════════════════════════
+# SIDEBAR
+# ═══════════════════════════════════════════
+
+with st.sidebar:
+    st.markdown("## 📁 Arquivo")
+    uploaded = st.file_uploader("Abrir JSON", type=["json"], key="sidebar_uploader",
+                                label_visibility="collapsed")
+    if uploaded:
+        try:
+            data = json.load(uploaded)
+            st.session_state.planning = PlanningData.from_dict(data)
+            planning = st.session_state.planning
+            st.success("JSON carregado!")
+        except Exception as e:
+            st.error(f"Erro: {e}")
+
+    st.download_button("⬇️ Exportar JSON", key="dl_json",
+        data=json.dumps(planning.to_dict(), ensure_ascii=False, indent=2).encode("utf-8"),
+        file_name="planning_export.json", mime="application/json")
+
+    if st.button("💾 Salvar planning.json", key="save_local"):
+        with open("planning.json", "w", encoding="utf-8") as f:
+            json.dump(planning.to_dict(), f, ensure_ascii=False, indent=2)
+        st.success("Salvo!")
+
+    st.markdown("---")
+    st.markdown("## 📦 Exportar")
+
+    if st.button("📊 Exportar Excel", key="btn_xlsx"):
+        xlsx = export_to_excel_bytes(planning)
+        st.download_button("⬇️ Baixar Excel", data=xlsx, key="dl_xlsx",
+            file_name="planning_multi_sheet.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+
+    if st.button("🗜️ Exportar CSVs (ZIP)", key="btn_zip"):
+        z = export_to_csv_zip(planning)
+        st.download_button("⬇️ Baixar ZIP", data=z, key="dl_zip",
+            file_name="planning_csvs.zip", mime="application/zip")
+
+    if st.button("📄 Gerar Relatório HTML", key="btn_html"):
+        html = build_html_report(planning)
+        st.download_button("⬇️ Baixar HTML", data=html.encode("utf-8"), key="dl_html",
+            file_name="relatorio_planejamento.html", mime="text/html")
+        st.success("Relatório pronto!")
+
+    st.markdown("---")
+    st.markdown("## 🗄️ Neon (Postgres)")
+    conn_str = st.text_input("Connection string", type="password",
+        value=os.environ.get("NEON_DATABASE_URL",""),
+        help="postgresql://user:senha@endpoint:5432/db?sslmode=require",
+        key="neon_conn")
+    if st.button("⬆️ Exportar para Neon", key="btn_neon"):
+        if not conn_str:
+            st.error("Informe a connection string.")
+        else:
+            with st.spinner("Exportando..."):
+                res = export_to_postgres(planning, conn_str)
+                st.success(res) if res.startswith("✅") else st.error(res)
+
+    st.markdown("---")
+    st.markdown("## 💡 Sugestões de OKRs")
+    for i, item in enumerate(suggest_okrs_from_data(planning), 1):
+        st.caption(f"{i}. {item}")
+
+
+# ═══════════════════════════════════════════
+# DASHBOARD KPIs
+# ═══════════════════════════════════════════
+
+today = date.today()
+total_prev_geral = sum(m.previsto for o in planning.okrs for m in o.meses)
+total_real_geral = sum(m.realizado for o in planning.okrs for m in o.meses)
+pct_real_geral = (total_real_geral / total_prev_geral * 100) if total_prev_geral > 0 else 0
+n_atrasados = sum(1 for a in planning.actions
+                  if a.status != "Concluído" and _safe_date(a.data_vencimento)
+                  and _safe_date(a.data_vencimento) < today)
+n_concluidos = sum(1 for a in planning.actions if a.status == "Concluído")
+n_andamento  = sum(1 for a in planning.actions if a.status == "Em andamento")
+
+col1, col2, col3, col4, col5 = st.columns(5)
+def kpi_html(val, label, color="#1565C0"):
+    return f"""<div class="kpi-card">
+    <div class="val" style="color:{color}">{val}</div>
+    <div class="lbl">{label}</div></div>"""
+
+col1.markdown(kpi_html(len(planning.okrs), "OKRs"), unsafe_allow_html=True)
+col2.markdown(kpi_html(f"{pct_real_geral:.1f}%", "Realização Geral",
+              BK_GREEN if pct_real_geral >= 90 else (BK_ORANGE if pct_real_geral >= 70 else BK_RED)), unsafe_allow_html=True)
+col3.markdown(kpi_html(len(planning.actions), "Planos de Ação"), unsafe_allow_html=True)
+col4.markdown(kpi_html(n_concluidos, "Concluídos", BK_GREEN), unsafe_allow_html=True)
+col5.markdown(kpi_html(n_atrasados, "Atrasados", BK_RED if n_atrasados > 0 else BK_GREEN), unsafe_allow_html=True)
+
+st.markdown("<div style='height:8px'></div>", unsafe_allow_html=True)
+
+
+# ═══════════════════════════════════════════
+# TABS
+# ═══════════════════════════════════════════
+
+tabs = st.tabs([
+    "🏠 Dashboard",
+    "👥 Sócios",
+    "🧭 Estratégia",
+    "🏢 Áreas",
+    "⚖️ SWOT",
+    "📈 OKRs",
+    "✅ Planos de Ação",
+    "📄 Relatórios"
+])
+
+
+# ══════════════ TAB 0: DASHBOARD ══════════════
+with tabs[0]:
+    st.markdown('<div class="section-title">Visão Geral Executiva</div>', unsafe_allow_html=True)
+
+    if planning.okrs:
+        fig_ov = fig_okrs_overview(planning)
+        st.plotly_chart(fig_ov, use_container_width=True, key="dash_okr_overview")
+
+        # Gauges de OKRs
+        st.markdown("**Performance por OKR**")
+        gauge_cols = st.columns(min(len(planning.okrs), 4))
+        for i, o in enumerate(planning.okrs[:4]):
+            with gauge_cols[i % 4]:
+                st.plotly_chart(fig_okr_gauge(o), use_container_width=True, key=f"dash_gauge_{i}")
+    else:
+        st.info("Cadastre OKRs na aba **📈 OKRs** para visualizar o dashboard.")
+
+    c1, c2 = st.columns(2)
+    with c1:
+        if planning.actions:
+            st.plotly_chart(fig_actions_status(planning), use_container_width=True, key="dash_actions_status")
+        else:
+            st.info("Nenhum plano de ação cadastrado.")
+    with c2:
+        if planning.swot:
+            st.plotly_chart(fig_swot_quadrant(planning.swot), use_container_width=True, key="dash_swot_quad")
+        else:
+            st.info("Nenhum item SWOT cadastrado.")
+
+    # Planos atrasados
+    if n_atrasados > 0:
+        st.markdown("---")
+        st.error(f"⚠️ **{n_atrasados} plano(s) atrasado(s)** — atenção imediata necessária!")
+        df_atrasados = pd.DataFrame([
+            {"Título": a.titulo, "Área": a.area, "Responsável": a.responsavel,
+             "Vencimento": a.data_vencimento,
+             "Dias de atraso": max(0, (today - _safe_date(a.data_vencimento)).days)
+                               if _safe_date(a.data_vencimento) else 0}
+            for a in planning.actions
+            if a.status != "Concluído" and _safe_date(a.data_vencimento)
+            and _safe_date(a.data_vencimento) < today
+        ]).sort_values("Dias de atraso", ascending=False)
+        st.dataframe(df_atrasados, use_container_width=True, hide_index=True)
+
+
+# ══════════════ TAB 1: SÓCIOS ══════════════
+with tabs[1]:
+    st.markdown('<div class="section-title">👥 Sócios / Diretoria</div>', unsafe_allow_html=True)
+
+    c1, c2 = st.columns([3, 2])
+    with c1:
+        st.caption("**Adicionar novo sócio**")
+        n1, n2 = st.columns(2)
+        nome = n1.text_input("Nome completo", key="p_nome")
+        cargo = n2.text_input("Cargo", key="p_cargo")
+        n3, n4 = st.columns(2)
+        email = n3.text_input("E-mail", key="p_email")
+        tel = n4.text_input("Telefone", key="p_tel")
+        obs = st.text_area("Observações", height=70, key="p_obs")
+        if st.button("➕ Adicionar Sócio", key="p_add", type="primary"):
+            if nome.strip():
+                planning.partners.append(Partner(nome, cargo, email, tel, obs))
+                save_planning(planning)
+                st.success("Sócio adicionado!")
+                st.rerun()
+            else:
+                st.warning("Informe o nome.")
+
+    with c2:
+        if planning.partners:
+            sel = st.selectbox("Excluir sócio", ["— selecionar —"] + [f"{i}: {p.nome}" for i, p in enumerate(planning.partners)], key="p_sel")
+            if sel != "— selecionar —" and st.button("🗑️ Excluir", key="p_del"):
+                idx = int(sel.split(":")[0])
+                planning.partners.pop(idx)
+                save_planning(planning)
+                st.success("Excluído.")
+                st.rerun()
+
+    if planning.partners:
+        st.markdown("**Tabela de sócios (editável)**")
+        df_p = pd.DataFrame([asdict(p) for p in planning.partners])
+        df_p.columns = ["Nome","Cargo","E-mail","Telefone","Observações"]
+        edited_p = try_data_editor(df_p, key="partners_editor", height=250,
+                                   use_container_width=True, num_rows="dynamic")
+        if edited_p is not None and st.button("💾 Salvar alterações (Sócios)", key="p_save"):
+            planning.partners = []
+            for _, r in edited_p.iterrows():
+                if str(r.get("Nome","")).strip():
+                    planning.partners.append(Partner(
+                        str(r.get("Nome","")), str(r.get("Cargo","")),
+                        str(r.get("E-mail","")), str(r.get("Telefone","")),
+                        str(r.get("Observações",""))
+                    ))
+            save_planning(planning)
+            st.success("Sócios salvos!")
+    else:
+        st.info("Nenhum sócio cadastrado ainda.")
+
+
+# ══════════════ TAB 2: ESTRATÉGIA ══════════════
+with tabs[2]:
+    st.markdown('<div class="section-title">🧭 Informações Estratégicas</div>', unsafe_allow_html=True)
+    st.caption("O 'norte' da empresa. Alimenta relatórios e dá coerência a OKRs e planos de ação.")
+    s = planning.strategic
+
+    colA, colB = st.columns(2)
+    with colA:
+        s.visao           = st.text_area("🎯 Visão (onde queremos chegar)", value=s.visao, height=100, key="s_visao")
+        s.missao          = st.text_area("🚀 Missão (por que existimos)", value=s.missao, height=100, key="s_missao")
+        s.proposta_valor  = st.text_area("💎 Proposta de valor", value=s.proposta_valor, height=100, key="s_pv")
+        s.publico_alvo    = st.text_area("👤 Público-alvo / ICP", value=s.publico_alvo, height=100, key="s_pub")
+    with colB:
+        s.valores         = st.text_area("⭐ Valores (comportamentos inegociáveis)", value=s.valores, height=100, key="s_val")
+        s.posicionamento  = st.text_area("🏆 Posicionamento", value=s.posicionamento, height=100, key="s_pos")
+        s.diferenciais    = st.text_area("⚡ Diferenciais competitivos", value=s.diferenciais, height=100, key="s_dif")
+        s.pilares         = st.text_area("🏛️ Pilares estratégicos (3–6)", value=s.pilares, height=100, key="s_pil")
+
+    s.objetivos_estrategicos = st.text_area("📋 Objetivos estratégicos (alto nível)", value=s.objetivos_estrategicos, height=120, key="s_obj")
+    s.notas = st.text_area("📝 Notas / hipóteses / restrições", value=s.notas, height=80, key="s_not")
+
+    planning.strategic = s
+    save_planning(planning)
+
+    with st.expander("💡 Modelo rápido para preenchimento"):
+        st.markdown("""
+- **Visão**: verbo + impacto + prazo. Ex.: *"Ser referência regional em engenharia elétrica industrial até 2029"*
+- **Missão**: público + entrega + diferencial. Ex.: *"Ajudar indústrias a reduzir custos com projetos elétricos seguros e inovadores"*
+- **Pilares**: 4–6 temas. Ex.: Crescimento Comercial, Excelência Técnica, Inovação/BIM, Pessoas, Sustentabilidade
+- **Objetivos**: conecte diretamente com seus OKRs: cada objetivo deve ter pelo menos 1 OKR mensurável
+        """)
+
+
+# ══════════════ TAB 3: ÁREAS ══════════════
+with tabs[3]:
+    st.markdown('<div class="section-title">🏢 Áreas e Responsáveis</div>', unsafe_allow_html=True)
+
+    c1, c2 = st.columns([3, 2])
+    with c1:
+        n1, n2 = st.columns(2)
+        area_n = n1.text_input("Área", key="ar_area")
+        resp   = n2.text_input("Responsável", key="ar_resp")
+        n3, n4 = st.columns(2)
+        a_email = n3.text_input("E-mail", key="ar_email")
+        a_obs   = n4.text_input("Observações", key="ar_obs")
+        if st.button("➕ Adicionar Área", key="ar_add", type="primary"):
+            if area_n.strip():
+                planning.areas.append(AreaResponsavel(area_n, resp, a_email, a_obs))
+                save_planning(planning)
+                st.success("Área adicionada!")
+                st.rerun()
+            else:
+                st.warning("Informe a área.")
+
+    with c2:
+        if planning.areas:
+            sel_a = st.selectbox("Excluir área", ["— selecionar —"] + [f"{i}: {a.area}" for i, a in enumerate(planning.areas)], key="ar_sel")
+            if sel_a != "— selecionar —" and st.button("🗑️ Excluir Área", key="ar_del"):
+                idx = int(sel_a.split(":")[0])
+                planning.areas.pop(idx)
+                save_planning(planning)
+                st.success("Excluído.")
+                st.rerun()
+
+    if planning.areas:
+        st.markdown("**Tabela de áreas (editável)**")
+        df_a = pd.DataFrame([asdict(a) for a in planning.areas])
+        df_a.columns = ["Área","Responsável","E-mail","Observações"]
+        edited_a = try_data_editor(df_a, key="areas_editor", height=250,
+                                   use_container_width=True, num_rows="dynamic")
+        if edited_a is not None and st.button("💾 Salvar Áreas", key="ar_save"):
+            planning.areas = []
+            for _, r in edited_a.iterrows():
+                if str(r.get("Área","")).strip():
+                    planning.areas.append(AreaResponsavel(
+                        str(r.get("Área","")), str(r.get("Responsável","")),
+                        str(r.get("E-mail","")), str(r.get("Observações",""))
+                    ))
+            save_planning(planning)
+            st.success("Áreas salvas!")
+    else:
+        st.info("Nenhuma área cadastrada.")
+
+
+# ══════════════ TAB 4: SWOT ══════════════
+with tabs[4]:
+    st.markdown('<div class="section-title">⚖️ Análise SWOT</div>', unsafe_allow_html=True)
+
+    # Gráfico 4 quadrantes
+    if planning.swot:
+        st.plotly_chart(fig_swot_quadrant(planning.swot), use_container_width=True, key="swot_tab_quad")
+    else:
+        st.info("Adicione itens SWOT abaixo para ver a matriz visual.")
+
+    st.markdown("**📝 Editar itens SWOT (estilo Excel)**")
+    st.caption("Edite diretamente nas células. Use a coluna **Excluir** para remover linhas. Adicione linhas novas na parte inferior.")
+
+    df_swot = pd.DataFrame([asdict(s) for s in planning.swot]) if planning.swot else pd.DataFrame(columns=["tipo","descricao","prioridade"])
+    df_swot.columns = ["Tipo","Descrição","Prioridade"] if not df_swot.empty else ["Tipo","Descrição","Prioridade"]
+    if "Excluir" not in df_swot.columns:
+        df_swot["Excluir"] = False
+
+    edited_swot = try_data_editor(
+        df_swot, key="swot_editor", height=360, use_container_width=True, num_rows="dynamic",
+        column_config={
+            "Tipo": st.column_config.SelectboxColumn("Tipo",
+                options=["Força","Fraqueza","Oportunidade","Ameaça"], required=True, width="small"),
+            "Prioridade": st.column_config.SelectboxColumn("Prioridade",
+                options=["Alta","Média","Baixa"], required=True, width="small"),
+            "Descrição": st.column_config.TextColumn("Descrição", width="large"),
+            "Excluir": st.column_config.CheckboxColumn("Excluir", width="small"),
+        }
+    )
+
+    col_s1, col_s2 = st.columns([2, 3])
+    with col_s1:
+        if st.button("💾 Salvar SWOT", key="swot_save", type="primary"):
+            if edited_swot is not None:
+                new_items = []
+                for _, r in edited_swot.iterrows():
+                    if bool(r.get("Excluir", False)): continue
+                    desc = str(r.get("Descrição","")).strip()
+                    if not desc: continue
+                    new_items.append(SWOTItem(
+                        tipo=str(r.get("Tipo","Força")),
+                        descricao=desc,
+                        prioridade=str(r.get("Prioridade","Média"))
+                    ))
+                planning.swot = new_items
+                save_planning(planning)
+                st.success("SWOT salva!")
+                st.rerun()
+
+    with col_s2:
+        if planning.swot:
+            counts = {}
+            for item in planning.swot:
+                counts[item.tipo] = counts.get(item.tipo, 0) + 1
+            st.markdown(" ".join([f"**{t}**: {c}" for t, c in counts.items()]))
+
+
+# ══════════════ TAB 5: OKRs ══════════════
+with tabs[5]:
+    st.markdown('<div class="section-title">📈 OKRs — Objetivos e Resultados-Chave (36 meses)</div>', unsafe_allow_html=True)
+    st.caption("1) Cadastre OKRs na tabela de metadados. 2) Preencha Previsto e Realizado. 3) Analise gráficos e indicadores.")
+
+    # ---- Cadastro de OKRs ----
+    with st.expander("➕ **Cadastro e Gestão de OKRs** (clique para expandir)", expanded=True):
+        df_meta = _okr_meta_df(planning)
+        unidade_opts = ["R$", "%", "Inteiro", "horas", "projetos", "clientes", "NPS"]
+
+        st.caption("Edite diretamente. Adicione novas linhas pelo botão '+'. Marque **Excluir** para remover.")
+        edited_meta = try_data_editor(
+            df_meta, key="okr_meta_editor", height=280, use_container_width=True,
+            disabled=["okr_id"],
+            column_config={
+                "okr_id": st.column_config.NumberColumn("ID", width="small"),
+                "OKR": st.column_config.TextColumn("Nome da OKR", width="large"),
+                "Área": st.column_config.TextColumn("Área", width="medium"),
+                "Unidade": st.column_config.SelectboxColumn("Unidade", options=unidade_opts, required=True, width="small"),
+                "Descrição": st.column_config.TextColumn("Descrição", width="large"),
+                "Início": st.column_config.DateColumn("Início", format="MM/YYYY", width="small"),
+                "Excluir": st.column_config.CheckboxColumn("Excluir", width="small"),
+            }
+        )
+        c_m1, c_m2 = st.columns([1, 3])
+        with c_m1:
+            if st.button("💾 Aplicar OKRs", key="okr_meta_apply", type="primary"):
+                if edited_meta is not None:
+                    _sync_okrs_from_meta(planning, edited_meta)
+                    save_planning(planning)
+                    st.success("OKRs atualizadas!")
+                    st.rerun()
+        with c_m2:
+            st.info("Dica: Crie uma nova linha em branco para adicionar uma OKR. Salve após editar.")
+
+    if not planning.okrs:
+        st.warning("⚠️ Cadastre ao menos 1 OKR para liberar as tabelas de Previsto/Realizado e os gráficos.")
+        st.stop()
+
+    okr_names = [o.nome for o in planning.okrs]
+
+    # ---- Previsto ----
+    with st.expander("📋 **Planejado (Previsto) — 36 meses**", expanded=False):
+        st.caption("Colunas M01..M36 = meses a partir do Início de cada OKR. Edite os valores diretamente.")
+        df_prev = _okr_wide_df(planning, "previsto")
+        month_cols_prev = {f"M{k+1:02d}": st.column_config.NumberColumn(f"M{k+1:02d}", format="%.2f", step=0.01)
+                           for k in range(36)}
+        edited_prev = try_data_editor(
+            df_prev, key="okr_prev_editor", height=320, use_container_width=True,
+            disabled=["okr_id","Unidade"],
+            column_config={
+                "OKR": st.column_config.SelectboxColumn("OKR", options=okr_names, required=True),
+                "Unidade": st.column_config.TextColumn("Unidade", width="small"),
+                **month_cols_prev
+            }
+        )
+        if st.button("💾 Salvar Planejado", key="okr_prev_save", type="primary"):
+            if edited_prev is not None:
+                _apply_wide_to_okrs(planning, edited_prev, "previsto")
+                save_planning(planning)
+                st.success("Planejado salvo!")
+
+    # ---- Realizado ----
+    with st.expander("📊 **Realizado — 36 meses**", expanded=False):
+        st.caption("Preencha conforme o realizado mês a mês.")
+        df_real = _okr_wide_df(planning, "realizado")
+        month_cols_real = {f"M{k+1:02d}": st.column_config.NumberColumn(f"M{k+1:02d}", format="%.2f", step=0.01)
+                           for k in range(36)}
+        edited_real = try_data_editor(
+            df_real, key="okr_real_editor", height=320, use_container_width=True,
+            disabled=["okr_id","Unidade"],
+            column_config={
+                "OKR": st.column_config.SelectboxColumn("OKR", options=okr_names, required=True),
+                "Unidade": st.column_config.TextColumn("Unidade", width="small"),
+                **month_cols_real
+            }
+        )
+        if st.button("💾 Salvar Realizado", key="okr_real_save", type="primary"):
+            if edited_real is not None:
+                _apply_wide_to_okrs(planning, edited_real, "realizado")
+                save_planning(planning)
+                st.success("Realizado salvo!")
+
+    # ---- Análise por OKR ----
+    st.markdown("---")
+    st.markdown("### 🔍 Análise Detalhada por OKR")
+
+    sel_okr = st.selectbox("Selecionar OKR para análise", options=okr_names, key="okr_sel_analysis")
+    okr_obj = next((o for o in planning.okrs if o.nome == sel_okr), None)
+
+    if okr_obj:
+        labels = _month_labels_for_okr(okr_obj)
+        prev = [float(okr_obj.meses[k].previsto) if k < len(okr_obj.meses) else 0.0 for k in range(36)]
+        real = [float(okr_obj.meses[k].realizado) if k < len(okr_obj.meses) else 0.0 for k in range(36)]
+
+        # KPIs da OKR
+        tp_okr = sum(prev); tr_okr = sum(real)
+        pct_okr = (tr_okr / tp_okr * 100) if tp_okr > 0 else 0
+        ks = st.columns(4)
+        ks[0].metric("Total Planejado", f"{tp_okr:,.2f}", help=f"Unidade: {okr_obj.unidade}")
+        ks[1].metric("Total Realizado", f"{tr_okr:,.2f}", help=f"Unidade: {okr_obj.unidade}")
+        ks[2].metric("Diferença", f"{tr_okr - tp_okr:+,.2f}")
+        ks[3].metric("% Realização", f"{pct_okr:.1f}%",
+                     delta=f"{pct_okr - 100:.1f}%",
+                     delta_color="normal" if pct_okr >= 100 else "inverse")
+
+        # Gauge
+        cg, _ = st.columns([1, 3])
+        with cg:
+            st.plotly_chart(fig_okr_gauge(okr_obj), use_container_width=True, key="okr_tab_gauge")
+
+        # Gráfico mensal
+        st.plotly_chart(fig_okr_monthly(okr_obj), use_container_width=True, key="okr_tab_monthly")
+
+        # Acumulado
+        st.plotly_chart(fig_okr_cumulative(okr_obj), use_container_width=True, key="okr_tab_cumulative")
+
+        # Tabela de comparação
+        st.markdown("**📋 Tabela Comparativa Mensal**")
+        diff = [r - p for r, p in zip(real, prev)]
+        status_list = ["✅ Acima" if d > 0 else ("⚠️ Abaixo" if d < 0 else "➖ Meta") for d in diff]
+        df_cmp = pd.DataFrame({
+            "Mês": labels, "Planejado": prev, "Realizado": real,
+            "Diferença": diff, "Status": status_list
+        })
+
+        def style_diff(val):
+            if isinstance(val, (int, float)):
+                color = "#059669" if val >= 0 else "#DC2626"
+                return f"color: {color}; font-weight: 600"
+            return ""
+
+        st.dataframe(
+            df_cmp.style.applymap(style_diff, subset=["Diferença"]),
+            use_container_width=True, height=400, hide_index=True
+        )
+
+        # Legenda meses
+        with st.expander("📅 Legenda das colunas M01..M36"):
+            st.dataframe(pd.DataFrame({"Coluna": [f"M{k+1:02d}" for k in range(36)], "Mês": labels}),
+                         use_container_width=True, height=300, hide_index=True)
+
+
+# ══════════════ TAB 6: PLANOS DE AÇÃO ══════════════
+with tabs[6]:
+    st.markdown('<div class="section-title">✅ Planos de Ação</div>', unsafe_allow_html=True)
+    st.caption("Registre iniciativas vinculadas às OKRs. Edite direto na tabela. Acompanhe status e atrasos.")
+
+    df_act = _actions_df(planning)
+    area_opts = [a.area for a in planning.areas] if planning.areas else []
+    resp_opts = [p.nome for p in planning.partners] if planning.partners else []
+
+    edited_act = try_data_editor(
+        df_act.drop(columns=["Status Efetivo"], errors="ignore"),
+        key="actions_editor", height=420, use_container_width=True, num_rows="dynamic",
+        column_config={
+            "Título": st.column_config.TextColumn("Título", width="large"),
+            "Área": st.column_config.SelectboxColumn("Área", options=area_opts + ["(outro)"], width="medium") if area_opts
+                    else st.column_config.TextColumn("Área", width="medium"),
+            "Responsável": st.column_config.SelectboxColumn("Responsável", options=resp_opts + ["(outro)"], width="medium") if resp_opts
+                           else st.column_config.TextColumn("Responsável", width="medium"),
+            "Descrição": st.column_config.TextColumn("Descrição", width="large"),
+            "Início": st.column_config.DateColumn("Início", format="DD/MM/YYYY"),
+            "Vencimento": st.column_config.DateColumn("Vencimento", format="DD/MM/YYYY"),
+            "Status": st.column_config.SelectboxColumn("Status",
+                options=["Pendente","Em andamento","Concluído"], required=True, width="small"),
+            "Observações": st.column_config.TextColumn("Observações", width="medium"),
+            "Excluir": st.column_config.CheckboxColumn("Excluir", width="small"),
+        }
+    )
+
+    c_a1, c_a2 = st.columns([1, 4])
+    with c_a1:
+        if st.button("💾 Salvar Planos", key="actions_save", type="primary"):
+            if edited_act is not None:
+                _sync_actions(planning, edited_act)
+                save_planning(planning)
+                st.success("Planos salvos!")
+                st.rerun()
+
+    # ---- Analytics ----
+    st.markdown("---")
+    st.markdown("### 📊 Painel de Acompanhamento")
+
+    if planning.actions:
+        m1, m2, m3, m4 = st.columns(4)
+        m1.metric("Total", len(planning.actions))
+        m2.metric("Concluídos", n_concluidos, f"{n_concluidos/max(len(planning.actions),1)*100:.0f}%")
+        m3.metric("Em andamento", n_andamento)
+        m4.metric("Atrasados", n_atrasados, delta=f"-{n_atrasados}" if n_atrasados else None,
+                  delta_color="inverse" if n_atrasados else "off")
+
+        cv1, cv2 = st.columns(2)
+        with cv1:
+            st.plotly_chart(fig_actions_status(planning), use_container_width=True, key="act_tab_status")
+        with cv2:
+            # Atrasos por responsável
+            df_a_full = _actions_df(planning)
+            df_a_full["dt_venc"] = df_a_full["Vencimento"].apply(_safe_date)
+            df_a_full["Atraso"] = df_a_full.apply(
+                lambda r: max(0, (today - r["dt_venc"]).days)
+                if (r["dt_venc"] and r["Status"] != "Concluído" and r["dt_venc"] < today) else 0, axis=1
+            )
+            df_atrasados_resp = df_a_full[df_a_full["Atraso"] > 0].groupby("Responsável")["Atraso"].sum().reset_index()
+            if not df_atrasados_resp.empty:
+                fig_resp = px.bar(df_atrasados_resp, x="Responsável", y="Atraso",
+                                  title="Atraso total por Responsável (dias)",
+                                  color="Atraso", color_continuous_scale=["#FEF3C7","#DC2626"])
+                st.plotly_chart(_fig_layout(fig_resp, height=320), use_container_width=True, key="act_tab_resp")
+            else:
+                st.success("✅ Nenhum plano atrasado!")
+
+        # Gantt
+        st.markdown("**📅 Linha do Tempo (Gantt)**")
+        st.plotly_chart(fig_actions_timeline(planning), use_container_width=True, key="act_tab_gantt")
+    else:
+        st.info("Nenhum plano de ação cadastrado ainda.")
+
+
+# ══════════════ TAB 7: RELATÓRIOS ══════════════
+with tabs[7]:
+    st.markdown('<div class="section-title">📄 Relatórios e Direcionamento Estratégico</div>', unsafe_allow_html=True)
+
+    # Sumário estratégico
+    s = planning.strategic
+    col1, col2 = st.columns(2)
+    with col1:
+        st.markdown("#### 🎯 Norte Estratégico")
+        st.markdown(f"**Visão:** {s.visao or '—'}")
+        st.markdown(f"**Missão:** {s.missao or '—'}")
+        st.markdown(f"**Pilares:** {s.pilares or '—'}")
+    with col2:
+        st.markdown("#### 💎 Mercado & Proposta")
+        st.markdown(f"**Proposta de valor:** {s.proposta_valor or '—'}")
+        st.markdown(f"**Público-alvo:** {s.publico_alvo or '—'}")
+        st.markdown(f"**Diferenciais:** {s.diferenciais or '—'}")
+
+    st.markdown("---")
+
+    # Sinais de execução OKRs
+    if planning.okrs:
+        st.markdown("#### 📈 Saúde das OKRs")
+        rows = []
+        for o in planning.okrs:
+            real_vals = [m.realizado for m in o.meses[:36]]
+            prev_vals = [m.previsto  for m in o.meses[:36]]
+            filled = sum(1 for v in real_vals if float(v) != 0.0)
+            tp = sum(prev_vals); tr = sum(real_vals)
+            pct = (tr / tp * 100) if tp > 0 else 0
+            semaforo = "🟢" if pct >= 95 else ("🟡" if pct >= 70 else "🔴")
+            rows.append({"": semaforo, "OKR": o.nome, "Área": o.area, "Unidade": o.unidade,
+                         "% Realização": f"{pct:.1f}%",
+                         "Meses preenchidos": f"{filled}/36 ({filled/36*100:.0f}%)"})
+        st.dataframe(pd.DataFrame(rows), use_container_width=True, height=200, hide_index=True)
+
+    # Recomendações automáticas
+    st.markdown("---")
+    st.markdown("#### 🧠 Recomendações Automáticas")
+    recs = []
+    if planning.swot:
+        threats = [s for s in planning.swot if s.tipo == "Ameaça" and s.prioridade == "Alta"]
+        opps    = [s for s in planning.swot if s.tipo == "Oportunidade" and s.prioridade == "Alta"]
+        weaknesses = [s for s in planning.swot if s.tipo == "Fraqueza" and s.prioridade == "Alta"]
+        if threats:    recs.append(f"🔴 {len(threats)} **Ameaça(s) Alta** — crie planos de mitigação com responsável e prazo claro.")
+        if opps:       recs.append(f"🔵 {len(opps)} **Oportunidade(s) Alta** — transforme em 1–2 OKRs por pilar estratégico.")
+        if weaknesses: recs.append(f"🟡 {len(weaknesses)} **Fraqueza(s) Alta** — endereçar com planos de ação de curto prazo.")
+    if n_atrasados:
+        recs.append(f"⚠️ **{n_atrasados} plano(s) atrasado(s)** — priorize replanejamento: escopo, capacidade, nova data.")
+    if planning.okrs:
+        recs.append("📅 Estabeleça **revisão mensal** do realizado e **revisão trimestral** de OKRs e prioridades.")
+        low_fill = [o.nome for o in planning.okrs
+                    if sum(1 for m in o.meses if m.realizado != 0) < 3]
+        if low_fill:
+            recs.append(f"📊 OKR(s) com pouco histórico: **{', '.join(low_fill[:3])}** — preencha o realizado mensalmente.")
+    if not recs:
+        recs.append("✅ Preencha Visão/Missão, SWOT e OKRs para gerar recomendações automáticas.")
+
+    for r in recs:
+        st.markdown(f"- {r}")
+
+    # Exportar relatório
+    st.markdown("---")
+    st.markdown("#### 📥 Exportar Relatório")
+    c_r1, c_r2, c_r3 = st.columns(3)
+    with c_r1:
+        if st.button("🌐 Gerar Relatório HTML", key="full_html_rep", type="primary"):
+            html = build_html_report(planning)
+            st.download_button("⬇️ Baixar HTML", data=html.encode("utf-8"),
+                               file_name="relatorio_planejamento.html", mime="text/html", key="dl_rep_html")
+            st.success("Relatório HTML pronto!")
+    with c_r2:
+        if st.button("📊 Exportar Excel completo", key="rep_xlsx"):
+            xlsx = export_to_excel_bytes(planning)
+            st.download_button("⬇️ Baixar Excel", data=xlsx,
+                               file_name="planejamento_completo.xlsx",
+                               mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                               key="dl_rep_xlsx")
+    with c_r3:
+        if st.button("🗜️ Exportar CSVs ZIP", key="rep_zip"):
+            z = export_to_csv_zip(planning)
+            st.download_button("⬇️ Baixar ZIP", data=z,
+                               file_name="planning_csvs.zip", mime="application/zip", key="dl_rep_zip")
+
+    # Preview HTML
+    with st.expander("👁️ Preview do Relatório HTML (in-app)"):
+        if st.button("Renderizar preview", key="preview_btn"):
+            html = build_html_report(planning)
+            st.components.v1.html(html, height=900, scrolling=True)
+
+st.markdown("<div style='height:16px'></div>", unsafe_allow_html=True)
+st.markdown("<footer style='text-align:center;color:#94A3B8;font-size:12px;padding:10px'>Produzido por BK Engenharia e Tecnologia</footer>", unsafe_allow_html=True)

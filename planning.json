@@ -1,0 +1,193 @@
+{
+  "partners": [
+    {
+      "nome": "Márcio Nunes Knopp",
+      "cargo": "Sócio-Diretor",
+      "email": "marcio@bk-engenharia.com",
+      "telefone": "+55 (00) 99999-9999",
+      "observacoes": "Responsável pela direção técnica."
+    }
+  ],
+  "areas": [
+    {
+      "area": "Projetos Elétricos",
+      "responsavel": "Márcio",
+      "email": "marcio@bk-engenharia.com",
+      "observacoes": ""
+    }
+  ],
+  "swot": [
+    {
+      "tipo": "Força",
+      "descricao": "Alta capacidade técnica",
+      "prioridade": "Alta"
+    }
+  ],
+  "okrs": [
+    {
+      "nome": "Aumentar faturamento recorrente da BK",
+      "area": "Comercial",
+      "unidade": "R$",
+      "descricao": "Meta 24 meses",
+      "inicio_ano": 2026,
+      "inicio_mes": 1,
+      "meses": [
+        {
+          "ano": 2026,
+          "mes": 1,
+          "previsto": 100000.0,
+          "realizado": 90000.0
+        },
+        {
+          "ano": 2026,
+          "mes": 2,
+          "previsto": 103000.0,
+          "realizado": 103000.0
+        },
+        {
+          "ano": 2026,
+          "mes": 3,
+          "previsto": 106090.0,
+          "realizado": 116699.0
+        },
+        {
+          "ano": 2026,
+          "mes": 4,
+          "previsto": 109272.7,
+          "realizado": 98345.43
+        },
+        {
+          "ano": 2026,
+          "mes": 5,
+          "previsto": 112550.88,
+          "realizado": 112550.88
+        },
+        {
+          "ano": 2026,
+          "mes": 6,
+          "previsto": 115927.41,
+          "realizado": 127520.15
+        },
+        {
+          "ano": 2026,
+          "mes": 7,
+          "previsto": 119405.23,
+          "realizado": 107464.71
+        },
+        {
+          "ano": 2026,
+          "mes": 8,
+          "previsto": 122987.39,
+          "realizado": 122987.39
+        },
+        {
+          "ano": 2026,
+          "mes": 9,
+          "previsto": 126677.01,
+          "realizado": 139344.71
+        },
+        {
+          "ano": 2026,
+          "mes": 10,
+          "previsto": 130477.32,
+          "realizado": 117429.59
+        },
+        {
+          "ano": 2026,
+          "mes": 11,
+          "previsto": 134391.64,
+          "realizado": 134391.64
+        },
+        {
+          "ano": 2026,
+          "mes": 12,
+          "previsto": 138423.39,
+          "realizado": 152265.73
+        },
+        {
+          "ano": 2027,
+          "mes": 1,
+          "previsto": 142576.09,
+          "realizado": 128318.48
+        },
+        {
+          "ano": 2027,
+          "mes": 2,
+          "previsto": 146853.37,
+          "realizado": 146853.37
+        },
+        {
+          "ano": 2027,
+          "mes": 3,
+          "previsto": 151258.97,
+          "realizado": 166384.87
+        },
+        {
+          "ano": 2027,
+          "mes": 4,
+          "previsto": 155796.74,
+          "realizado": 140217.07
+        },
+        {
+          "ano": 2027,
+          "mes": 5,
+          "previsto": 160470.64,
+          "realizado": 160470.64
+        },
+        {
+          "ano": 2027,
+          "mes": 6,
+          "previsto": 165284.76,
+          "realizado": 181813.24
+        },
+        {
+          "ano": 2027,
+          "mes": 7,
+          "previsto": 170243.31,
+          "realizado": 153218.98
+        },
+        {
+          "ano": 2027,
+          "mes": 8,
+          "previsto": 175350.61,
+          "realizado": 175350.61
+        },
+        {
+          "ano": 2027,
+          "mes": 9,
+          "previsto": 180611.12,
+          "realizado": 198672.24
+        },
+        {
+          "ano": 2027,
+          "mes": 10,
+          "previsto": 186029.46,
+          "realizado": 167426.51
+        },
+        {
+          "ano": 2027,
+          "mes": 11,
+          "previsto": 191610.34,
+          "realizado": 191610.34
+        },
+        {
+          "ano": 2027,
+          "mes": 12,
+          "previsto": 197358.65,
+          "realizado": 217094.52
+        }
+      ]
+    }
+  ],
+  "actions": [
+    {
+      "titulo": "Implantar pipeline de propostas",
+      "area": "Comercial",
+      "responsavel": "Resp Comercial",
+      "descricao": "Padronizar propostas",
+      "data_vencimento": "2026-02-08",
+      "status": "Em andamento",
+      "observacoes": ""
+    }
+  ]
+}
