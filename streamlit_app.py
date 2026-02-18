@@ -384,28 +384,46 @@ def export_to_postgres(planning: PlanningData, conn_str: str = "") -> str:
 
 def try_data_editor(df: pd.DataFrame, key: Optional[str] = None,
                     height: Optional[int] = None, column_config=None, **kwargs) -> Optional[pd.DataFrame]:
+    """Wrapper robusto para st.data_editor — garante num_rows e disabled sempre passados."""
     if height is not None: kwargs.setdefault("height", height)
     if column_config is not None: kwargs.setdefault("column_config", column_config)
+    # Garante que num_rows="dynamic" seja o padrão (permite adicionar/remover linhas)
+    kwargs.setdefault("num_rows", "dynamic")
+
     editor_fn = getattr(st, "data_editor", None) or getattr(st, "experimental_data_editor", None)
     if editor_fn is None:
         st.dataframe(df)
         return df
+
     call_kwargs = dict(kwargs)
     if key is not None: call_kwargs["key"] = key
-    try:
-        sig = inspect.signature(editor_fn)
-        allowed = set(sig.parameters.keys())
-        call_kwargs = {k: v for k, v in call_kwargs.items() if k in allowed}
-    except Exception:
-        pass
+
+    # Tenta com todos os kwargs; se falhar por parâmetro desconhecido, remove um a um
+    params_to_try_removing = ["disabled", "column_order", "hide_index"]
     try:
         return editor_fn(df, **call_kwargs)
-    except TypeError:
-        call_kwargs.pop("key", None)
-        try: return editor_fn(df, **call_kwargs)
-        except Exception: st.dataframe(df); return df
+    except TypeError as e:
+        err = str(e)
+        for param in params_to_try_removing:
+            if param in err and param in call_kwargs:
+                call_kwargs.pop(param)
+                try:
+                    return editor_fn(df, **call_kwargs)
+                except Exception:
+                    pass
+        # último recurso: só df + key + height + num_rows
+        minimal = {"num_rows": call_kwargs.get("num_rows", "dynamic"),
+                   "use_container_width": call_kwargs.get("use_container_width", True)}
+        if "height" in call_kwargs: minimal["height"] = call_kwargs["height"]
+        if key: minimal["key"] = key
+        try:
+            return editor_fn(df, **minimal)
+        except Exception:
+            st.dataframe(df)
+            return df
     except Exception:
-        st.dataframe(df); return df
+        st.dataframe(df)
+        return df
 
 
 # ═══════════════════════════════════════════
@@ -998,18 +1016,36 @@ def _actions_df(pl: PlanningData) -> pd.DataFrame:
     return pd.DataFrame(rows, columns=cols) if rows else pd.DataFrame(columns=cols)
 
 def _sync_actions(pl: PlanningData, df: pd.DataFrame) -> None:
+    def _fmt_date(val) -> str:
+        """Converte datetime.date, pd.Timestamp ou string para YYYY-MM-DD."""
+        if val is None or (isinstance(val, float) and pd.isna(val)):
+            return date.today().strftime("%Y-%m-%d")
+        if isinstance(val, (datetime, pd.Timestamp)):
+            return val.strftime("%Y-%m-%d")
+        if isinstance(val, date):
+            return val.strftime("%Y-%m-%d")
+        s = str(val).strip()
+        for fmt in ("%Y-%m-%d", "%d/%m/%Y", "%m/%d/%Y"):
+            try:
+                return datetime.strptime(s, fmt).strftime("%Y-%m-%d")
+            except ValueError:
+                pass
+        return date.today().strftime("%Y-%m-%d")
+
     new_actions = []
     for _, r in df.iterrows():
-        if bool(r.get("Excluir", False)): continue
+        if bool(r.get("Excluir", False)):
+            continue
         titulo = str(r.get("Título","")).strip()
-        if not titulo: continue
-        inicio = str(r.get("Início","")).strip() or date.today().strftime("%Y-%m-%d")
-        venc = str(r.get("Vencimento","")).strip() or date.today().strftime("%Y-%m-%d")
+        if not titulo:
+            continue
         new_actions.append(PlanoAcao(
-            titulo=titulo, area=str(r.get("Área","")).strip(),
+            titulo=titulo,
+            area=str(r.get("Área","")).strip(),
             responsavel=str(r.get("Responsável","")).strip(),
             descricao=str(r.get("Descrição","")).strip(),
-            data_inicio=inicio, data_vencimento=venc,
+            data_inicio=_fmt_date(r.get("Início")),
+            data_vencimento=_fmt_date(r.get("Vencimento")),
             status=str(r.get("Status","Pendente")).strip(),
             observacoes=str(r.get("Observações","")).strip()
         ))
@@ -1565,6 +1601,7 @@ with tabs[5]:
                            for k in range(36)}
         edited_prev = try_data_editor(
             df_prev, key="okr_prev_editor", height=320, use_container_width=True,
+            num_rows="dynamic",
             disabled=["okr_id","Unidade"],
             column_config={
                 "OKR": st.column_config.SelectboxColumn("OKR", options=okr_names, required=True),
@@ -1586,6 +1623,7 @@ with tabs[5]:
                            for k in range(36)}
         edited_real = try_data_editor(
             df_real, key="okr_real_editor", height=320, use_container_width=True,
+            num_rows="dynamic",
             disabled=["okr_id","Unidade"],
             column_config={
                 "OKR": st.column_config.SelectboxColumn("OKR", options=okr_names, required=True),
@@ -1662,39 +1700,91 @@ with tabs[5]:
 # ══════════════ TAB 6: PLANOS DE AÇÃO ══════════════
 with tabs[6]:
     st.markdown('<div class="section-title">✅ Planos de Ação</div>', unsafe_allow_html=True)
-    st.caption("Registre iniciativas vinculadas às OKRs. Edite direto na tabela. Acompanhe status e atrasos.")
 
-    df_act = _actions_df(planning)
-    area_opts = [a.area for a in planning.areas] if planning.areas else []
-    resp_opts = [p.nome for p in planning.partners] if planning.partners else []
+    # ── Formulário: adicionar novo plano ──
+    with st.expander("➕ **Adicionar novo Plano de Ação**", expanded=False):
+        area_opts  = [a.area for a in planning.areas]  if planning.areas   else []
+        resp_opts  = [p.nome for p in planning.partners] if planning.partners else []
+        okr_opts   = [o.nome for o in planning.okrs]   if planning.okrs    else []
 
-    edited_act = try_data_editor(
-        df_act.drop(columns=["Status Efetivo"], errors="ignore"),
-        key="actions_editor", height=420, use_container_width=True, num_rows="dynamic",
+        fa1, fa2, fa3 = st.columns(3)
+        novo_titulo = fa1.text_input("Título *", key="na_titulo")
+        novo_area   = fa2.selectbox("Área", options=area_opts + ["(outra)"], key="na_area") if area_opts                       else fa2.text_input("Área", key="na_area_txt")
+        novo_resp   = fa3.selectbox("Responsável", options=resp_opts + ["(outro)"], key="na_resp") if resp_opts                       else fa3.text_input("Responsável", key="na_resp_txt")
+
+        fb1, fb2, fb3 = st.columns(3)
+        novo_inicio = fb1.date_input("Data Início", value=date.today(), key="na_inicio")
+        novo_venc   = fb2.date_input("Data Vencimento", value=date.today(), key="na_venc")
+        novo_status = fb3.selectbox("Status", ["Pendente","Em andamento","Concluído"], key="na_status")
+
+        fc1, fc2 = st.columns([2, 1])
+        novo_desc = fc1.text_input("Descrição", key="na_desc")
+        novo_obs  = fc2.text_input("Observações", key="na_obs")
+
+        if st.button("➕ Adicionar Plano", key="na_add", type="primary"):
+            if not novo_titulo.strip():
+                st.warning("Informe o Título do plano.")
+            else:
+                area_val = novo_area if area_opts else st.session_state.get("na_area_txt","")
+                resp_val = novo_resp if resp_opts else st.session_state.get("na_resp_txt","")
+                planning.actions.append(PlanoAcao(
+                    titulo=novo_titulo.strip(),
+                    area=area_val,
+                    responsavel=resp_val,
+                    descricao=novo_desc.strip(),
+                    data_inicio=novo_inicio.strftime("%Y-%m-%d"),
+                    data_vencimento=novo_venc.strftime("%Y-%m-%d"),
+                    status=novo_status,
+                    observacoes=novo_obs.strip(),
+                ))
+                save_planning(planning)
+                st.success(f"Plano **{novo_titulo}** adicionado!")
+                st.rerun()
+
+    # ── Tabela editável ──
+    st.markdown("**📋 Tabela de Planos (editável — clique na célula para alterar)**")
+    st.caption("Edite diretamente nas células. Marque **Excluir** para remover. Clique em 💾 Salvar ao terminar.")
+
+    df_act = _actions_df(planning).drop(columns=["Status Efetivo"], errors="ignore")
+
+    # Converter colunas de data de string para datetime.date (obrigatório para DateColumn)
+    for _dcol in ["Início", "Vencimento"]:
+        if _dcol in df_act.columns:
+            df_act[_dcol] = pd.to_datetime(df_act[_dcol], errors="coerce").dt.date
+
+    # Usar st.data_editor diretamente — evita filtro do wrapper que remove num_rows
+    edited_act = st.data_editor(
+        df_act,
+        key="actions_editor",
+        height=420,
+        use_container_width=True,
+        num_rows="dynamic",
         column_config={
-            "Título": st.column_config.TextColumn("Título", width="large"),
-            "Área": st.column_config.SelectboxColumn("Área", options=area_opts + ["(outro)"], width="medium") if area_opts
-                    else st.column_config.TextColumn("Área", width="medium"),
-            "Responsável": st.column_config.SelectboxColumn("Responsável", options=resp_opts + ["(outro)"], width="medium") if resp_opts
-                           else st.column_config.TextColumn("Responsável", width="medium"),
-            "Descrição": st.column_config.TextColumn("Descrição", width="large"),
-            "Início": st.column_config.DateColumn("Início", format="DD/MM/YYYY"),
-            "Vencimento": st.column_config.DateColumn("Vencimento", format="DD/MM/YYYY"),
-            "Status": st.column_config.SelectboxColumn("Status",
-                options=["Pendente","Em andamento","Concluído"], required=True, width="small"),
+            "Título":      st.column_config.TextColumn("Título", width="large"),
+            "Área":        st.column_config.TextColumn("Área", width="medium"),
+            "Responsável": st.column_config.TextColumn("Responsável", width="medium"),
+            "Descrição":   st.column_config.TextColumn("Descrição", width="large"),
+            "Início":      st.column_config.DateColumn("Início", format="DD/MM/YYYY"),
+            "Vencimento":  st.column_config.DateColumn("Vencimento", format="DD/MM/YYYY"),
+            "Status":      st.column_config.SelectboxColumn("Status",
+                               options=["Pendente","Em andamento","Concluído"],
+                               required=True, width="small"),
             "Observações": st.column_config.TextColumn("Observações", width="medium"),
-            "Excluir": st.column_config.CheckboxColumn("Excluir", width="small"),
-        }
+            "Excluir":     st.column_config.CheckboxColumn("Excluir", width="small"),
+        },
+        hide_index=True,
     )
 
     c_a1, c_a2 = st.columns([1, 4])
     with c_a1:
-        if st.button("💾 Salvar Planos", key="actions_save", type="primary"):
+        if st.button("💾 Salvar alterações", key="actions_save", type="primary"):
             if edited_act is not None:
                 _sync_actions(planning, edited_act)
                 save_planning(planning)
                 st.success("Planos salvos!")
                 st.rerun()
+    with c_a2:
+        st.caption("💡 Use o formulário acima para adicionar novos planos. Edite campos e clique em Salvar.")
 
     # ---- Analytics ----
     st.markdown("---")
