@@ -29,9 +29,14 @@ from plotly.subplots import make_subplots
 import streamlit as st
 from sqlalchemy import create_engine, text
 
-# ═══════════════════════════════════════════
+# ============================================
+# CONFIGURAÇÃO DO BANCO DE DADOS (Neon)
+# ============================================
+DB_CONN_STR = "postgresql://neondb_owner:npg_TiJv0WHSG7pU@ep-jolly-heart-ahj739cl-pooler.c-3.us-east-1.aws.neon.tech/neondb?sslmode=require&channel_binding=require"
+
+# ============================================
 # PALETA BK — cores consistentes
-# ═══════════════════════════════════════════
+# ============================================
 BK_BLUE      = "#1565C0"
 BK_BLUE_LIGHT= "#42A5F5"
 BK_TEAL      = "#00897B"
@@ -57,9 +62,9 @@ STATUS_COLORS = {
     "Atrasado":    BK_RED,
 }
 
-# ═══════════════════════════════════════════
+# ============================================
 # MODELOS DE DADOS
-# ═══════════════════════════════════════════
+# ============================================
 
 @dataclass
 class Partner:
@@ -227,9 +232,9 @@ def build_example() -> "PlanningData":
     return PlanningData()
 
 
-# ═══════════════════════════════════════════
+# ============================================
 # UTILITÁRIOS DE DADOS / EXPORT
-# ═══════════════════════════════════════════
+# ============================================
 
 def okr_to_dataframe(okr: OKR) -> pd.DataFrame:
     rows = []
@@ -378,9 +383,81 @@ def export_to_postgres(planning: PlanningData, conn_str: str = "") -> str:
         return f"❌ Erro durante exportação para Postgres: {e}"
 
 
-# ═══════════════════════════════════════════
+# ============================================
+# FUNÇÕES DE CARREGAMENTO DO BANCO
+# ============================================
+
+def load_from_postgres(conn_str: str) -> Optional[PlanningData]:
+    """Carrega dados do PostgreSQL e retorna um objeto PlanningData."""
+    try:
+        engine = create_engine(conn_str, future=True)
+        with engine.connect() as conn:
+            # Carrega dados básicos
+            df_partners = pd.read_sql("SELECT nome,cargo,email,telefone,observacoes FROM partners", conn)
+            df_areas = pd.read_sql("SELECT area,responsavel,email,observacoes FROM areas", conn)
+            df_swot = pd.read_sql("SELECT tipo,descricao,prioridade FROM swot", conn)
+            df_actions = pd.read_sql("SELECT titulo,area,responsavel,descricao,data_inicio,data_vencimento,status,observacoes FROM actions", conn)
+
+            # Carrega OKRs e meses
+            df_okr = pd.read_sql("SELECT id,nome,area,unidade,descricao,inicio_ano,inicio_mes FROM okr", conn)
+            df_okr_mes = pd.read_sql("SELECT okr_id,idx_mes,ano,mes,previsto,realizado FROM okr_mes ORDER BY okr_id, idx_mes", conn)
+
+        # Constrói objetos
+        partners = [Partner(**row) for _, row in df_partners.iterrows()]
+        areas = [AreaResponsavel(**row) for _, row in df_areas.iterrows()]
+        swot = [SWOTItem(**row) for _, row in df_swot.iterrows()]
+
+        actions = []
+        for _, row in df_actions.iterrows():
+            act = row.to_dict()
+            # Converte date para string
+            if act.get("data_inicio"):
+                act["data_inicio"] = act["data_inicio"].strftime("%Y-%m-%d")
+            if act.get("data_vencimento"):
+                act["data_vencimento"] = act["data_vencimento"].strftime("%Y-%m-%d")
+            actions.append(PlanoAcao(**act))
+
+        okrs = []
+        for _, okr_row in df_okr.iterrows():
+            okr_id = okr_row["id"]
+            meses_df = df_okr_mes[df_okr_mes["okr_id"] == okr_id].sort_values("idx_mes")
+            meses = []
+            for _, mrow in meses_df.iterrows():
+                meses.append(OKRMonthData(
+                    ano=int(mrow["ano"]),
+                    mes=int(mrow["mes"]),
+                    previsto=float(mrow["previsto"]),
+                    realizado=float(mrow["realizado"])
+                ))
+            okr = OKR(
+                nome=okr_row["nome"],
+                area=okr_row["area"] or "",
+                unidade=okr_row["unidade"] or "",
+                descricao=okr_row["descricao"] or "",
+                inicio_ano=int(okr_row["inicio_ano"]),
+                inicio_mes=int(okr_row["inicio_mes"]),
+                meses=meses
+            )
+            okrs.append(okr)
+
+        planning = PlanningData(
+            strategic=StrategicInfo(),  # informações estratégicas não estão no DB; podem ser adicionadas futuramente
+            partners=partners,
+            areas=areas,
+            swot=swot,
+            okrs=okrs,
+            actions=actions
+        )
+        return planning
+    except Exception as e:
+        # Se falhar, retorna None e o app usará JSON ou vazio
+        print(f"Erro ao carregar do PostgreSQL: {e}")
+        return None
+
+
+# ============================================
 # WRAPPER data_editor — compatibilidade
-# ═══════════════════════════════════════════
+# ============================================
 
 def try_data_editor(df: pd.DataFrame, key: Optional[str] = None,
                     height: Optional[int] = None, column_config=None, **kwargs) -> Optional[pd.DataFrame]:
@@ -426,9 +503,9 @@ def try_data_editor(df: pd.DataFrame, key: Optional[str] = None,
         return df
 
 
-# ═══════════════════════════════════════════
+# ============================================
 # HELPERS GRÁFICOS
-# ═══════════════════════════════════════════
+# ============================================
 
 PLOTLY_TEMPLATE = "plotly_white"
 
@@ -689,9 +766,9 @@ def fig_okrs_overview(planning: PlanningData) -> go.Figure:
     return fig
 
 
-# ═══════════════════════════════════════════
+# ============================================
 # HELPERS OKR
-# ═══════════════════════════════════════════
+# ============================================
 
 def _month_labels_for_okr(o: OKR) -> List[str]:
     labels = []
@@ -781,9 +858,9 @@ def _apply_wide_to_okrs(pl: PlanningData, df_wide: pd.DataFrame, kind: str) -> N
             else: o.meses[k].realizado = fv
 
 
-# ═══════════════════════════════════════════
+# ============================================
 # RELATÓRIO HTML
-# ═══════════════════════════════════════════
+# ============================================
 
 def format_brl(value: float) -> str:
     try:
@@ -1052,9 +1129,9 @@ def _sync_actions(pl: PlanningData, df: pd.DataFrame) -> None:
     pl.actions = new_actions
 
 
-# ═══════════════════════════════════════════
+# ============================================
 # APP CONFIG & CSS GLOBAL
-# ═══════════════════════════════════════════
+# ============================================
 
 st.set_page_config(
     page_title="BK Planejamento Estratégico",
@@ -1167,30 +1244,37 @@ details summary {
 """, unsafe_allow_html=True)
 
 
-# ═══════════════════════════════════════════
-# LOAD STATE
-# ═══════════════════════════════════════════
+# ============================================
+# LOAD STATE — AGORA COM CARGA DO BANCO
+# ============================================
 
 if "planning" not in st.session_state:
-    if os.path.exists("planning.json"):
-        try:
-            with open("planning.json", "r", encoding="utf-8") as f:
-                data = json.load(f)
-            st.session_state.planning = PlanningData.from_dict(data)
-        except Exception:
-            st.session_state.planning = PlanningData()
-    else:
-        st.session_state.planning = PlanningData()
+    # Tenta carregar do banco de dados
+    planning = load_from_postgres(DB_CONN_STR)
+    if planning is None:
+        # Se falhar, tenta carregar do JSON local
+        if os.path.exists("planning.json"):
+            try:
+                with open("planning.json", "r", encoding="utf-8") as f:
+                    data = json.load(f)
+                planning = PlanningData.from_dict(data)
+            except Exception:
+                planning = PlanningData()
+        else:
+            planning = PlanningData()
+    st.session_state.planning = planning
 
 planning: PlanningData = st.session_state.planning
 
 def save_planning(pl: PlanningData):
+    """Salva no session_state e persiste no banco automaticamente."""
     st.session_state.planning = pl
+    export_to_postgres(pl, DB_CONN_STR)
 
 
-# ═══════════════════════════════════════════
+# ============================================
 # HEADER
-# ═══════════════════════════════════════════
+# ============================================
 
 st.markdown("""
 <div class="bk-hero">
@@ -1200,9 +1284,9 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 
-# ═══════════════════════════════════════════
+# ============================================
 # SIDEBAR
-# ═══════════════════════════════════════════
+# ============================================
 
 with st.sidebar:
     st.markdown("## 📁 Arquivo")
@@ -1246,19 +1330,7 @@ with st.sidebar:
             file_name="relatorio_planejamento.html", mime="text/html")
         st.success("Relatório pronto!")
 
-    st.markdown("---")
-    st.markdown("## 🗄️ Neon (Postgres)")
-    conn_str = st.text_input("Connection string", type="password",
-        value=os.environ.get("NEON_DATABASE_URL",""),
-        help="postgresql://user:senha@endpoint:5432/db?sslmode=require",
-        key="neon_conn")
-    if st.button("⬆️ Exportar para Neon", key="btn_neon"):
-        if not conn_str:
-            st.error("Informe a connection string.")
-        else:
-            with st.spinner("Exportando..."):
-                res = export_to_postgres(planning, conn_str)
-                st.success(res) if res.startswith("✅") else st.error(res)
+    # ===== SEÇÃO NEON REMOVIDA =====
 
     st.markdown("---")
     st.markdown("## 💡 Sugestões de OKRs")
@@ -1266,9 +1338,9 @@ with st.sidebar:
         st.caption(f"{i}. {item}")
 
 
-# ═══════════════════════════════════════════
+# ============================================
 # DASHBOARD KPIs
-# ═══════════════════════════════════════════
+# ============================================
 
 today = date.today()
 total_prev_geral = sum(m.previsto for o in planning.okrs for m in o.meses)
@@ -1296,9 +1368,9 @@ col5.markdown(kpi_html(n_atrasados, "Atrasados", BK_RED if n_atrasados > 0 else 
 st.markdown("<div style='height:8px'></div>", unsafe_allow_html=True)
 
 
-# ═══════════════════════════════════════════
+# ============================================
 # TABS
-# ═══════════════════════════════════════════
+# ============================================
 
 tabs = st.tabs([
     "🏠 Dashboard",
