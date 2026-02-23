@@ -977,9 +977,10 @@ def build_html_report(planning: PlanningData) -> str:
 ] if val)}
 </table></div>""")
 
-    # Sócios
+    #  Sócios e Equipe Liderança
+    
     if planning.partners:
-        parts.append('<div class="card"><h2>👥 Sócios</h2><table><tr><th>Nome</th><th>Cargo</th><th>E-mail</th><th>Telefone</th></tr>')
+        parts.append('<div class="card"><h2>👥 Sócios/Gestores</h2><table><tr><th>Nome</th><th>Cargo</th><th>E-mail</th><th>Telefone</th></tr>')
         for p in planning.partners:
             parts.append(f"<tr><td><b>{p.nome}</b></td><td>{p.cargo}</td><td>{p.email}</td><td>{p.telefone}</td></tr>")
         parts.append("</table></div>")
@@ -1374,7 +1375,7 @@ st.markdown("<div style='height:8px'></div>", unsafe_allow_html=True)
 
 tabs = st.tabs([
     "🏠 Dashboard",
-    "👥 Sócios",
+    "👥 Sócios/Gestores",
     "🧭 Estratégia",
     "🏢 Áreas",
     "⚖️ SWOT",
@@ -1429,13 +1430,13 @@ with tabs[0]:
         st.dataframe(df_atrasados, use_container_width=True, hide_index=True)
 
 
-# ══════════════ TAB 1: SÓCIOS ══════════════
+# ══════════════ TAB 1: SÓCIOS / GESTORES ══════════════
 with tabs[1]:
-    st.markdown('<div class="section-title">👥 Sócios / Diretoria</div>', unsafe_allow_html=True)
+    st.markdown('<div class="section-title">👥 Sócios/Gestores</div>', unsafe_allow_html=True)
 
     c1, c2 = st.columns([3, 2])
     with c1:
-        st.caption("**Adicionar novo sócio**")
+        st.caption("**Adicionar novo sócio/Gestor**")
         n1, n2 = st.columns(2)
         nome = n1.text_input("Nome completo", key="p_nome")
         cargo = n2.text_input("Cargo", key="p_cargo")
@@ -1454,7 +1455,7 @@ with tabs[1]:
 
     with c2:
         if planning.partners:
-            sel = st.selectbox("Excluir sócio", ["— selecionar —"] + [f"{i}: {p.nome}" for i, p in enumerate(planning.partners)], key="p_sel")
+            sel = st.selectbox("Excluir sócio/Gestor", ["— selecionar —"] + [f"{i}: {p.nome}" for i, p in enumerate(planning.partners)], key="p_sel")
             if sel != "— selecionar —" and st.button("🗑️ Excluir", key="p_del"):
                 idx = int(sel.split(":")[0])
                 planning.partners.pop(idx)
@@ -1463,12 +1464,12 @@ with tabs[1]:
                 st.rerun()
 
     if planning.partners:
-        st.markdown("**Tabela de sócios (editável)**")
+        st.markdown("**Tabela de sócios/gestores (editável)**")
         df_p = pd.DataFrame([asdict(p) for p in planning.partners])
         df_p.columns = ["Nome","Cargo","E-mail","Telefone","Observações"]
         edited_p = try_data_editor(df_p, key="partners_editor", height=250,
                                    use_container_width=True, num_rows="dynamic")
-        if edited_p is not None and st.button("💾 Salvar alterações (Sócios)", key="p_save"):
+        if edited_p is not None and st.button("💾 Salvar alterações (Sócios/Gestores)", key="p_save"):
             planning.partners = []
             for _, r in edited_p.iterrows():
                 if str(r.get("Nome","")).strip():
@@ -1478,9 +1479,9 @@ with tabs[1]:
                         str(r.get("Observações",""))
                     ))
             save_planning(planning)
-            st.success("Sócios salvos!")
+            st.success("Sócio/Gestor salvo!")
     else:
-        st.info("Nenhum sócio cadastrado ainda.")
+        st.info("Nenhum sócio/Gestor cadastrado ainda.")
 
 
 # ══════════════ TAB 2: ESTRATÉGIA ══════════════
