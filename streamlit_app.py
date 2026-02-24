@@ -32,7 +32,23 @@ from sqlalchemy import create_engine, text
 # ============================================
 # CONFIGURAÇÃO DO BANCO DE DADOS (Neon)
 # ============================================
-DB_CONN_STR = "postgresql://neondb_owner:npg_TiJv0WHSG7pU@ep-jolly-heart-ahj739cl-pooler.c-3.us-east-1.aws.neon.tech/neondb?sslmode=require&channel_binding=require"
+_DB_CONN_FALLBACK = "postgresql://neondb_owner:npg_TiJv0WHSG7pU@ep-jolly-heart-ahj739cl-pooler.c-3.us-east-1.aws.neon.tech/neondb?sslmode=require&channel_binding=require"
+
+def _get_db_conn_str() -> str:
+    """Retorna connection string: secrets.toml > env var > hardcoded fallback."""
+    try:
+        secret = st.secrets.get("neon", {}).get("connection", "")
+        if secret and secret.strip():
+            return secret.strip()
+    except Exception:
+        pass
+    env = os.environ.get("NEON_DATABASE_URL", "")
+    if env:
+        return env
+    return _DB_CONN_FALLBACK
+
+# Será resolvido após st estar disponível
+DB_CONN_STR = _DB_CONN_FALLBACK  # placeholder — atualizado no boot
 
 # ============================================
 # PALETA BK — cores consistentes
@@ -300,13 +316,20 @@ def export_to_postgres(planning: PlanningData, conn_str: str = "") -> str:
         except Exception:
             pass
     if not conn_str:
-        return "Connection string vazia. Configure NEON_DATABASE_URL ou st.secrets['neon']['connection']."
+        return "❌ Connection string vazia. Configure NEON_DATABASE_URL ou st.secrets['neon']['connection']."
     try:
         engine = create_engine(conn_str, future=True)
     except Exception as e:
-        return f"Erro ao criar engine: {e}"
+        return f"❌ Erro ao criar engine: {e}"
 
     ddl_statements = [
+        """CREATE TABLE IF NOT EXISTS strategic (
+            id INTEGER PRIMARY KEY DEFAULT 1,
+            visao TEXT DEFAULT '', missao TEXT DEFAULT '', valores TEXT DEFAULT '',
+            proposta_valor TEXT DEFAULT '', posicionamento TEXT DEFAULT '',
+            objetivos_estrategicos TEXT DEFAULT '', pilares TEXT DEFAULT '',
+            publico_alvo TEXT DEFAULT '', diferenciais TEXT DEFAULT '', notas TEXT DEFAULT '',
+            CHECK (id = 1));""",
         """CREATE TABLE IF NOT EXISTS partners (id SERIAL PRIMARY KEY, nome TEXT NOT NULL,
            cargo TEXT, email TEXT, telefone TEXT, observacoes TEXT, UNIQUE (nome, email));""",
         """CREATE TABLE IF NOT EXISTS areas (id SERIAL PRIMARY KEY, area TEXT NOT NULL,
@@ -327,58 +350,87 @@ def export_to_postgres(planning: PlanningData, conn_str: str = "") -> str:
         with engine.begin() as conn:
             for ddl in ddl_statements:
                 conn.execute(text(ddl))
+
+            # ── Strategic (singleton row) ──
+            s = planning.strategic
+            conn.execute(text("""
+                INSERT INTO strategic (id,visao,missao,valores,proposta_valor,posicionamento,
+                    objetivos_estrategicos,pilares,publico_alvo,diferenciais,notas)
+                VALUES (1,:visao,:missao,:valores,:proposta_valor,:posicionamento,
+                    :objetivos_estrategicos,:pilares,:publico_alvo,:diferenciais,:notas)
+                ON CONFLICT (id) DO UPDATE SET
+                    visao=EXCLUDED.visao, missao=EXCLUDED.missao, valores=EXCLUDED.valores,
+                    proposta_valor=EXCLUDED.proposta_valor, posicionamento=EXCLUDED.posicionamento,
+                    objetivos_estrategicos=EXCLUDED.objetivos_estrategicos, pilares=EXCLUDED.pilares,
+                    publico_alvo=EXCLUDED.publico_alvo, diferenciais=EXCLUDED.diferenciais,
+                    notas=EXCLUDED.notas"""),
+                {"visao":s.visao,"missao":s.missao,"valores":s.valores,
+                 "proposta_valor":s.proposta_valor,"posicionamento":s.posicionamento,
+                 "objetivos_estrategicos":s.objetivos_estrategicos,"pilares":s.pilares,
+                 "publico_alvo":s.publico_alvo,"diferenciais":s.diferenciais,"notas":s.notas})
+
+            # ── Partners (delete+reinsert para sincronizar exclusões) ──
+            conn.execute(text("DELETE FROM partners"))
             for p in planning.partners:
                 conn.execute(text("""INSERT INTO partners (nome,cargo,email,telefone,observacoes)
-                    VALUES (:nome,:cargo,:email,:telefone,:observacoes)
-                    ON CONFLICT (nome, email) DO UPDATE SET cargo=EXCLUDED.cargo,
-                    telefone=EXCLUDED.telefone, observacoes=EXCLUDED.observacoes"""),
+                    VALUES (:nome,:cargo,:email,:telefone,:observacoes)"""),
                     {"nome":p.nome,"cargo":p.cargo,"email":p.email,"telefone":p.telefone,"observacoes":p.observacoes})
+
+            # ── Areas ──
+            conn.execute(text("DELETE FROM areas"))
             for a in planning.areas:
                 conn.execute(text("""INSERT INTO areas (area,responsavel,email,observacoes)
-                    VALUES (:area,:responsavel,:email,:observacoes)
-                    ON CONFLICT (area) DO UPDATE SET responsavel=EXCLUDED.responsavel,
-                    email=EXCLUDED.email, observacoes=EXCLUDED.observacoes"""),
+                    VALUES (:area,:responsavel,:email,:observacoes)"""),
                     {"area":a.area,"responsavel":a.responsavel,"email":a.email,"observacoes":a.observacoes})
-            for s in planning.swot:
+
+            # ── SWOT ──
+            conn.execute(text("DELETE FROM swot"))
+            for sw in planning.swot:
                 conn.execute(text("""INSERT INTO swot (tipo,descricao,prioridade)
-                    VALUES (:tipo,:descricao,:prioridade)
-                    ON CONFLICT (tipo, descricao) DO UPDATE SET prioridade=EXCLUDED.prioridade"""),
-                    {"tipo":s.tipo,"descricao":s.descricao,"prioridade":s.prioridade})
+                    VALUES (:tipo,:descricao,:prioridade)"""),
+                    {"tipo":sw.tipo,"descricao":sw.descricao,"prioridade":sw.prioridade})
+
+            # ── OKRs (delete cascade limpa okr_mes junto) ──
+            conn.execute(text("DELETE FROM okr_mes"))
+            conn.execute(text("DELETE FROM okr"))
             for o in planning.okrs:
                 res = conn.execute(text("""INSERT INTO okr (nome,area,unidade,descricao,inicio_ano,inicio_mes)
                     VALUES (:nome,:area,:unidade,:descricao,:inicio_ano,:inicio_mes)
-                    ON CONFLICT (nome) DO UPDATE SET area=EXCLUDED.area, unidade=EXCLUDED.unidade,
-                    descricao=EXCLUDED.descricao, inicio_ano=EXCLUDED.inicio_ano, inicio_mes=EXCLUDED.inicio_mes
                     RETURNING id"""),
                     {"nome":o.nome,"area":o.area,"unidade":o.unidade,"descricao":o.descricao,
                      "inicio_ano":o.inicio_ano,"inicio_mes":o.inicio_mes})
                 row = res.fetchone()
                 okr_id = row[0] if row else None
-                if not okr_id:
-                    r2 = conn.execute(text("SELECT id FROM okr WHERE nome=:nome"), {"nome":o.nome})
-                    row2 = r2.fetchone()
-                    okr_id = row2[0] if row2 else None
                 if okr_id:
                     for idx, m in enumerate(o.meses, start=1):
                         conn.execute(text("""INSERT INTO okr_mes (okr_id,idx_mes,ano,mes,previsto,realizado)
-                            VALUES (:okr_id,:idx_mes,:ano,:mes,:previsto,:realizado)
-                            ON CONFLICT (okr_id,idx_mes) DO UPDATE SET ano=EXCLUDED.ano, mes=EXCLUDED.mes,
-                            previsto=EXCLUDED.previsto, realizado=EXCLUDED.realizado"""),
+                            VALUES (:okr_id,:idx_mes,:ano,:mes,:previsto,:realizado)"""),
                             {"okr_id":okr_id,"idx_mes":idx,"ano":m.ano,"mes":m.mes,
                              "previsto":m.previsto,"realizado":m.realizado})
+
+            # ── Actions ──
+            conn.execute(text("DELETE FROM actions"))
             for ac in planning.actions:
-                try: data_v = datetime.strptime(ac.data_vencimento, "%Y-%m-%d").date(); dv = ac.data_vencimento
-                except Exception: dv = None
-                if dv is None: continue
+                try:
+                    datetime.strptime(ac.data_vencimento, "%Y-%m-%d")
+                    dv = ac.data_vencimento
+                except Exception:
+                    dv = None
+                if dv is None:
+                    continue
+                di = getattr(ac, "data_inicio", None)
+                if di:
+                    try:
+                        datetime.strptime(di, "%Y-%m-%d")
+                    except Exception:
+                        di = dv
                 conn.execute(text("""INSERT INTO actions (titulo,area,responsavel,descricao,data_inicio,data_vencimento,status,observacoes)
-                    VALUES (:titulo,:area,:responsavel,:descricao,:data_inicio,:data_vencimento,:status,:observacoes)
-                    ON CONFLICT (titulo,data_vencimento) DO UPDATE SET area=EXCLUDED.area,
-                    responsavel=EXCLUDED.responsavel, descricao=EXCLUDED.descricao,
-                    status=EXCLUDED.status, observacoes=EXCLUDED.observacoes"""),
+                    VALUES (:titulo,:area,:responsavel,:descricao,:data_inicio,:data_vencimento,:status,:observacoes)"""),
                     {"titulo":ac.titulo,"area":ac.area,"responsavel":ac.responsavel,"descricao":ac.descricao,
-                     "data_inicio":getattr(ac,"data_inicio",None),"data_vencimento":dv,
+                     "data_inicio":di,"data_vencimento":dv,
                      "status":ac.status,"observacoes":ac.observacoes})
-        return "✅ Exportação para PostgreSQL (Neon) concluída com sucesso (UPSERT)."
+
+        return "✅ Exportação para PostgreSQL (Neon) concluída com sucesso."
     except Exception as e:
         return f"❌ Erro durante exportação para Postgres: {e}"
 
@@ -392,13 +444,29 @@ def load_from_postgres(conn_str: str) -> Optional[PlanningData]:
     try:
         engine = create_engine(conn_str, future=True)
         with engine.connect() as conn:
-            # Carrega dados básicos
+            # Verifica se as tabelas existem
+            check = conn.execute(text(
+                "SELECT tablename FROM pg_tables WHERE schemaname='public' AND tablename='okr'"))
+            if check.fetchone() is None:
+                return None  # BD vazio — sem tabelas criadas ainda
+
+            # ── Strategic ──
+            strategic = StrategicInfo()
+            try:
+                df_strat = pd.read_sql("SELECT * FROM strategic WHERE id=1", conn)
+                if not df_strat.empty:
+                    row = df_strat.iloc[0].to_dict()
+                    known = {f.name for f in fields(StrategicInfo)}
+                    safe = {k: (v if v is not None else "") for k, v in row.items() if k in known}
+                    strategic = StrategicInfo(**safe)
+            except Exception:
+                pass  # tabela pode não existir ainda
+
+            # ── Dados tabulares ──
             df_partners = pd.read_sql("SELECT nome,cargo,email,telefone,observacoes FROM partners", conn)
             df_areas = pd.read_sql("SELECT area,responsavel,email,observacoes FROM areas", conn)
             df_swot = pd.read_sql("SELECT tipo,descricao,prioridade FROM swot", conn)
             df_actions = pd.read_sql("SELECT titulo,area,responsavel,descricao,data_inicio,data_vencimento,status,observacoes FROM actions", conn)
-
-            # Carrega OKRs e meses
             df_okr = pd.read_sql("SELECT id,nome,area,unidade,descricao,inicio_ano,inicio_mes FROM okr", conn)
             df_okr_mes = pd.read_sql("SELECT okr_id,idx_mes,ano,mes,previsto,realizado FROM okr_mes ORDER BY okr_id, idx_mes", conn)
 
@@ -410,11 +478,15 @@ def load_from_postgres(conn_str: str) -> Optional[PlanningData]:
         actions = []
         for _, row in df_actions.iterrows():
             act = row.to_dict()
-            # Converte date para string
-            if act.get("data_inicio"):
-                act["data_inicio"] = act["data_inicio"].strftime("%Y-%m-%d")
-            if act.get("data_vencimento"):
-                act["data_vencimento"] = act["data_vencimento"].strftime("%Y-%m-%d")
+            for dcol in ("data_inicio", "data_vencimento"):
+                v = act.get(dcol)
+                if v is not None and not isinstance(v, str):
+                    try:
+                        act[dcol] = v.strftime("%Y-%m-%d")
+                    except Exception:
+                        act[dcol] = str(v)
+                elif v is None:
+                    act[dcol] = date.today().strftime("%Y-%m-%d")
             actions.append(PlanoAcao(**act))
 
         okrs = []
@@ -441,7 +513,7 @@ def load_from_postgres(conn_str: str) -> Optional[PlanningData]:
             okrs.append(okr)
 
         planning = PlanningData(
-            strategic=StrategicInfo(),  # informações estratégicas não estão no DB; podem ser adicionadas futuramente
+            strategic=strategic,
             partners=partners,
             areas=areas,
             swot=swot,
@@ -450,7 +522,6 @@ def load_from_postgres(conn_str: str) -> Optional[PlanningData]:
         )
         return planning
     except Exception as e:
-        # Se falhar, retorna None e o app usará JSON ou vazio
         print(f"Erro ao carregar do PostgreSQL: {e}")
         return None
 
@@ -1141,6 +1212,9 @@ st.set_page_config(
     initial_sidebar_state="expanded"
 )
 
+# Resolve a connection string agora que st.secrets está disponível
+DB_CONN_STR = _get_db_conn_str()
+
 st.markdown("""
 <style>
 /* Fonte e background global */
@@ -1250,27 +1324,38 @@ details summary {
 # ============================================
 
 if "planning" not in st.session_state:
-    # Tenta carregar do banco de dados
-    planning = load_from_postgres(DB_CONN_STR)
+    planning = None
+    # Tenta carregar do JSON local primeiro (sempre atualizado pelo save_planning)
+    if os.path.exists("planning.json"):
+        try:
+            with open("planning.json", "r", encoding="utf-8") as f:
+                data = json.load(f)
+            planning = PlanningData.from_dict(data)
+        except Exception:
+            planning = None
+    # Se não tiver JSON, tenta o banco de dados
     if planning is None:
-        # Se falhar, tenta carregar do JSON local
-        if os.path.exists("planning.json"):
-            try:
-                with open("planning.json", "r", encoding="utf-8") as f:
-                    data = json.load(f)
-                planning = PlanningData.from_dict(data)
-            except Exception:
-                planning = PlanningData()
-        else:
-            planning = PlanningData()
+        planning = load_from_postgres(DB_CONN_STR)
+    # Último recurso: dados vazios
+    if planning is None:
+        planning = PlanningData()
     st.session_state.planning = planning
 
 planning: PlanningData = st.session_state.planning
 
 def save_planning(pl: PlanningData):
-    """Salva no session_state e persiste no banco automaticamente."""
+    """Salva no session_state, persiste em planning.json e tenta exportar ao banco."""
     st.session_state.planning = pl
-    export_to_postgres(pl, DB_CONN_STR)
+    # Persistência local (principal) — garante que dados sobrevivem a refresh
+    try:
+        with open("planning.json", "w", encoding="utf-8") as f:
+            json.dump(pl.to_dict(), f, ensure_ascii=False, indent=2)
+    except Exception as e:
+        st.warning(f"⚠️ Erro ao salvar planning.json: {e}")
+    # Persistência remota (Neon)
+    msg = export_to_postgres(pl, DB_CONN_STR)
+    if msg and "❌" in msg:
+        st.warning(f"BD: {msg}")
 
 
 # ============================================
@@ -1298,7 +1383,8 @@ with st.sidebar:
             data = json.load(uploaded)
             st.session_state.planning = PlanningData.from_dict(data)
             planning = st.session_state.planning
-            st.success("JSON carregado!")
+            save_planning(planning)
+            st.success("JSON carregado e salvo!")
         except Exception as e:
             st.error(f"Erro: {e}")
 
@@ -1307,9 +1393,26 @@ with st.sidebar:
         file_name="planning_export.json", mime="application/json")
 
     if st.button("💾 Salvar planning.json", key="save_local"):
-        with open("planning.json", "w", encoding="utf-8") as f:
-            json.dump(planning.to_dict(), f, ensure_ascii=False, indent=2)
+        save_planning(planning)
         st.success("Salvo!")
+
+    st.markdown("---")
+    st.markdown("## 💾 Persistência")
+    if os.path.exists("planning.json"):
+        mtime = datetime.fromtimestamp(os.path.getmtime("planning.json")).strftime("%d/%m %H:%M")
+        st.caption(f"📄 JSON local: ✅ ({mtime})")
+    else:
+        st.caption("📄 JSON local: ⚠️ nenhum arquivo")
+
+    # Status do banco de dados
+    if st.button("🔌 Testar conexão Neon", key="test_db"):
+        try:
+            _eng = create_engine(DB_CONN_STR, future=True)
+            with _eng.connect() as _c:
+                _c.execute(text("SELECT 1"))
+            st.success("🟢 Neon conectado!")
+        except Exception as e:
+            st.error(f"🔴 Falha: {e}")
 
     st.markdown("---")
     st.markdown("## 📦 Exportar")
@@ -1480,6 +1583,7 @@ with tabs[1]:
                     ))
             save_planning(planning)
             st.success("Sócio/Gestor salvo!")
+            st.rerun()
     else:
         st.info("Nenhum sócio/Gestor cadastrado ainda.")
 
@@ -1505,8 +1609,10 @@ with tabs[2]:
     s.objetivos_estrategicos = st.text_area("📋 Objetivos estratégicos (alto nível)", value=s.objetivos_estrategicos, height=120, key="s_obj")
     s.notas = st.text_area("📝 Notas / hipóteses / restrições", value=s.notas, height=80, key="s_not")
 
-    planning.strategic = s
-    save_planning(planning)
+    if st.button("💾 Salvar Estratégia", key="s_save", type="primary"):
+        planning.strategic = s
+        save_planning(planning)
+        st.success("Estratégia salva!")
 
     with st.expander("💡 Modelo rápido para preenchimento"):
         st.markdown("""
@@ -1564,6 +1670,7 @@ with tabs[3]:
                     ))
             save_planning(planning)
             st.success("Áreas salvas!")
+            st.rerun()
     else:
         st.info("Nenhuma área cadastrada.")
 
@@ -1687,6 +1794,7 @@ with tabs[5]:
                 _apply_wide_to_okrs(planning, edited_prev, "previsto")
                 save_planning(planning)
                 st.success("Planejado salvo!")
+                st.rerun()
 
     # ---- Realizado ----
     with st.expander("📊 **Realizado — 36 meses**", expanded=False):
@@ -1709,6 +1817,7 @@ with tabs[5]:
                 _apply_wide_to_okrs(planning, edited_real, "realizado")
                 save_planning(planning)
                 st.success("Realizado salvo!")
+                st.rerun()
 
     # ---- Análise por OKR ----
     st.markdown("---")
