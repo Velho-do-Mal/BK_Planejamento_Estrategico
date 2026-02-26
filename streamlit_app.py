@@ -1622,7 +1622,7 @@ with tabs[1]:
         email = n3.text_input("E-mail", key="p_email")
         tel = n4.text_input("Telefone", key="p_tel")
         obs = st.text_area("Observações", height=70, key="p_obs")
-        if st.button("➕ Adicionar Sócio", key="p_add", type="primary"):
+        if st.button("➕ Adicionar", key="p_add", type="primary"):
             if nome.strip():
                 planning.partners.append(Partner(nome, cargo, email, tel, obs))
                 save_planning(planning)
