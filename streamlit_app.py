@@ -15,6 +15,7 @@ import base64
 import io
 import json
 import os
+import sqlite3
 import zipfile
 import inspect
 from dataclasses import dataclass, asdict, field, fields
@@ -153,6 +154,8 @@ class PlanoAcao:
     data_vencimento: str
     status: str = "Pendente"
     observacoes: str = ""
+    okr: str = ""
+    como_fazer: str = ""
 
 @dataclass
 class PlanningData:
@@ -228,6 +231,9 @@ class PlanningData:
             try:
                 if "data_inicio" not in ac:
                     ac = {**ac, "data_inicio": ac.get("data_vencimento", date.today().strftime("%Y-%m-%d"))}
+                # Garante campos novos (retrocompatibilidade)
+                ac.setdefault("okr", "")
+                ac.setdefault("como_fazer", "")
                 pd_obj.actions.append(PlanoAcao(**ac))
             except Exception:
                 try:
@@ -236,7 +242,8 @@ class PlanningData:
                         responsavel=ac.get("responsavel",""), descricao=ac.get("descricao",""),
                         data_inicio=ac.get("data_inicio", date.today().strftime("%Y-%m-%d")),
                         data_vencimento=ac.get("data_vencimento", date.today().strftime("%Y-%m-%d")),
-                        status=ac.get("status","Pendente"), observacoes=ac.get("observacoes","")
+                        status=ac.get("status","Pendente"), observacoes=ac.get("observacoes",""),
+                        okr=ac.get("okr",""), como_fazer=ac.get("como_fazer","")
                     ))
                 except Exception:
                     pass
@@ -272,7 +279,7 @@ def planning_to_dataframes(planning: PlanningData) -> Dict[str, pd.DataFrame]:
                                  "previsto": m.previsto, "realizado": m.realizado})
     df_okr = pd.DataFrame(okr_rows) if okr_rows else pd.DataFrame(columns=["okr_id","nome","area","unidade","descricao","inicio_ano","inicio_mes"])
     df_okr_mes = pd.DataFrame(okrmes_rows) if okrmes_rows else pd.DataFrame(columns=["okr_id","idx_mes","ano","mes","previsto","realizado"])
-    df_actions = pd.DataFrame([asdict(a) for a in planning.actions]) if planning.actions else pd.DataFrame(columns=["titulo","area","responsavel","descricao","data_inicio","data_vencimento","status","observacoes"])
+    df_actions = pd.DataFrame([asdict(a) for a in planning.actions]) if planning.actions else pd.DataFrame(columns=["titulo","area","responsavel","descricao","data_inicio","data_vencimento","status","observacoes","okr","como_fazer"])
     return {"partners": df_partners, "areas": df_areas, "swot": df_swot,
             "okrs": df_okr, "okr_mes": df_okr_mes, "actions": df_actions}
 
@@ -344,12 +351,20 @@ def export_to_postgres(planning: PlanningData, conn_str: str = "") -> str:
            previsto DOUBLE PRECISION NOT NULL, realizado DOUBLE PRECISION NOT NULL, UNIQUE (okr_id, idx_mes));""",
         """CREATE TABLE IF NOT EXISTS actions (id SERIAL PRIMARY KEY, titulo TEXT NOT NULL,
            area TEXT, responsavel TEXT, descricao TEXT, data_inicio DATE, data_vencimento DATE,
-           status TEXT NOT NULL, observacoes TEXT, UNIQUE (titulo, data_vencimento));""",
+           status TEXT NOT NULL, observacoes TEXT, okr TEXT DEFAULT '', como_fazer TEXT DEFAULT '',
+           UNIQUE (titulo, data_vencimento));""",
     ]
     try:
         with engine.begin() as conn:
             for ddl in ddl_statements:
                 conn.execute(text(ddl))
+
+            # Garantir que colunas novas existam em tabelas antigas
+            for _col, _def in [("okr", "TEXT DEFAULT ''"), ("como_fazer", "TEXT DEFAULT ''")]:
+                try:
+                    conn.execute(text(f"ALTER TABLE actions ADD COLUMN IF NOT EXISTS {_col} {_def}"))
+                except Exception:
+                    pass
 
             # ── Strategic (singleton row) ──
             s = planning.strategic
@@ -424,11 +439,12 @@ def export_to_postgres(planning: PlanningData, conn_str: str = "") -> str:
                         datetime.strptime(di, "%Y-%m-%d")
                     except Exception:
                         di = dv
-                conn.execute(text("""INSERT INTO actions (titulo,area,responsavel,descricao,data_inicio,data_vencimento,status,observacoes)
-                    VALUES (:titulo,:area,:responsavel,:descricao,:data_inicio,:data_vencimento,:status,:observacoes)"""),
+                conn.execute(text("""INSERT INTO actions (titulo,area,responsavel,descricao,data_inicio,data_vencimento,status,observacoes,okr,como_fazer)
+                    VALUES (:titulo,:area,:responsavel,:descricao,:data_inicio,:data_vencimento,:status,:observacoes,:okr,:como_fazer)"""),
                     {"titulo":ac.titulo,"area":ac.area,"responsavel":ac.responsavel,"descricao":ac.descricao,
                      "data_inicio":di,"data_vencimento":dv,
-                     "status":ac.status,"observacoes":ac.observacoes})
+                     "status":ac.status,"observacoes":ac.observacoes,
+                     "okr":getattr(ac,"okr",""),"como_fazer":getattr(ac,"como_fazer","")})
 
         return "✅ Exportação para PostgreSQL (Neon) concluída com sucesso."
     except Exception as e:
@@ -466,7 +482,7 @@ def load_from_postgres(conn_str: str) -> Optional[PlanningData]:
             df_partners = pd.read_sql("SELECT nome,cargo,email,telefone,observacoes FROM partners", conn)
             df_areas = pd.read_sql("SELECT area,responsavel,email,observacoes FROM areas", conn)
             df_swot = pd.read_sql("SELECT tipo,descricao,prioridade FROM swot", conn)
-            df_actions = pd.read_sql("SELECT titulo,area,responsavel,descricao,data_inicio,data_vencimento,status,observacoes FROM actions", conn)
+            df_actions = pd.read_sql("SELECT titulo,area,responsavel,descricao,data_inicio,data_vencimento,status,observacoes,COALESCE(okr,'') as okr,COALESCE(como_fazer,'') as como_fazer FROM actions", conn)
             df_okr = pd.read_sql("SELECT id,nome,area,unidade,descricao,inicio_ano,inicio_mes FROM okr", conn)
             df_okr_mes = pd.read_sql("SELECT okr_id,idx_mes,ano,mes,previsto,realizado FROM okr_mes ORDER BY okr_id, idx_mes", conn)
 
@@ -523,6 +539,70 @@ def load_from_postgres(conn_str: str) -> Optional[PlanningData]:
         return planning
     except Exception as e:
         print(f"Erro ao carregar do PostgreSQL: {e}")
+        return None
+
+
+# ============================================
+# PERSISTÊNCIA LOCAL — SQLite
+# ============================================
+
+SQLITE_PATH = "bk_planejamento.db"
+
+def _sqlite_conn():
+    return sqlite3.connect(SQLITE_PATH)
+
+def save_to_sqlite(planning: PlanningData) -> str:
+    """Salva todos os dados no SQLite local (bk_planejamento.db)."""
+    try:
+        conn = _sqlite_conn()
+        c = conn.cursor()
+        # DDL
+        c.execute("""CREATE TABLE IF NOT EXISTS planning_json (
+            id INTEGER PRIMARY KEY CHECK (id=1),
+            data TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        )""")
+        # Salva como JSON completo (simples, robusto, sem perda de schema)
+        data_json = json.dumps(planning.to_dict(), ensure_ascii=False)
+        now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        c.execute("""INSERT INTO planning_json (id, data, updated_at) VALUES (1, ?, ?)
+                     ON CONFLICT(id) DO UPDATE SET data=excluded.data, updated_at=excluded.updated_at""",
+                  (data_json, now))
+        conn.commit()
+        conn.close()
+        return "✅"
+    except Exception as e:
+        return f"❌ SQLite: {e}"
+
+def load_from_sqlite() -> Optional[PlanningData]:
+    """Carrega dados do SQLite local."""
+    if not os.path.exists(SQLITE_PATH):
+        return None
+    try:
+        conn = _sqlite_conn()
+        c = conn.cursor()
+        c.execute("SELECT data FROM planning_json WHERE id=1")
+        row = c.fetchone()
+        conn.close()
+        if row:
+            data = json.loads(row[0])
+            return PlanningData.from_dict(data)
+        return None
+    except Exception:
+        return None
+
+def sqlite_last_updated() -> Optional[str]:
+    """Retorna timestamp da última atualização no SQLite."""
+    if not os.path.exists(SQLITE_PATH):
+        return None
+    try:
+        conn = _sqlite_conn()
+        c = conn.cursor()
+        c.execute("SELECT updated_at FROM planning_json WHERE id=1")
+        row = c.fetchone()
+        conn.close()
+        return row[0] if row else None
+    except Exception:
         return None
 
 
@@ -1151,17 +1231,27 @@ def _safe_date(s: str) -> Optional[date]:
 def _actions_df(pl: PlanningData) -> pd.DataFrame:
     rows = []
     today = date.today()
+    from datetime import timedelta
     for a in pl.actions:
         dv = _safe_date(a.data_vencimento)
         status_eff = a.status
-        if a.status != "Concluído" and dv and dv < today:
+        # Semáforo: 🟢 concluído, 🟡 falta ≤2 dias, 🔴 atrasado, ⚪ normal
+        if a.status == "Concluído":
+            semaforo = "🟢"
+        elif dv and dv < today:
             status_eff = "Atrasado"
-        rows.append({"Título": a.titulo, "Área": a.area, "Responsável": a.responsavel,
-                     "Descrição": a.descricao,
+            semaforo = "🔴"
+        elif dv and (dv - today).days <= 2:
+            semaforo = "🟡"
+        else:
+            semaforo = "⚪"
+        rows.append({"": semaforo, "Título": a.titulo, "OKR": getattr(a,"okr",""),
+                     "Área": a.area, "Responsável": a.responsavel,
+                     "Descrição": a.descricao, "Como Fazer": getattr(a,"como_fazer",""),
                      "Início": a.data_inicio if hasattr(a, "data_inicio") else "",
                      "Vencimento": a.data_vencimento, "Status": a.status,
                      "Status Efetivo": status_eff, "Observações": a.observacoes, "Excluir": False})
-    cols = ["Título","Área","Responsável","Descrição","Início","Vencimento","Status","Status Efetivo","Observações","Excluir"]
+    cols = ["","Título","OKR","Área","Responsável","Descrição","Como Fazer","Início","Vencimento","Status","Status Efetivo","Observações","Excluir"]
     return pd.DataFrame(rows, columns=cols) if rows else pd.DataFrame(columns=cols)
 
 def _sync_actions(pl: PlanningData, df: pd.DataFrame) -> None:
@@ -1196,7 +1286,9 @@ def _sync_actions(pl: PlanningData, df: pd.DataFrame) -> None:
             data_inicio=_fmt_date(r.get("Início")),
             data_vencimento=_fmt_date(r.get("Vencimento")),
             status=str(r.get("Status","Pendente")).strip(),
-            observacoes=str(r.get("Observações","")).strip()
+            observacoes=str(r.get("Observações","")).strip(),
+            okr=str(r.get("OKR","")).strip(),
+            como_fazer=str(r.get("Como Fazer","")).strip(),
         ))
     pl.actions = new_actions
 
@@ -1325,18 +1417,21 @@ details summary {
 
 if "planning" not in st.session_state:
     planning = None
-    # Tenta carregar do JSON local primeiro (sempre atualizado pelo save_planning)
-    if os.path.exists("planning.json"):
+    # 1. SQLite local (principal — sempre atualizado pelo save_planning)
+    planning = load_from_sqlite()
+    # 2. Retrocompatibilidade: se tiver planning.json antigo, migra para SQLite
+    if planning is None and os.path.exists("planning.json"):
         try:
             with open("planning.json", "r", encoding="utf-8") as f:
                 data = json.load(f)
             planning = PlanningData.from_dict(data)
+            save_to_sqlite(planning)  # migra para SQLite
         except Exception:
             planning = None
-    # Se não tiver JSON, tenta o banco de dados
+    # 3. Neon (nuvem — fallback)
     if planning is None:
         planning = load_from_postgres(DB_CONN_STR)
-    # Último recurso: dados vazios
+    # 4. Último recurso: dados vazios
     if planning is None:
         planning = PlanningData()
     st.session_state.planning = planning
@@ -1344,18 +1439,16 @@ if "planning" not in st.session_state:
 planning: PlanningData = st.session_state.planning
 
 def save_planning(pl: PlanningData):
-    """Salva no session_state, persiste em planning.json e tenta exportar ao banco."""
+    """Salva no session_state, persiste em SQLite local e sincroniza com Neon."""
     st.session_state.planning = pl
-    # Persistência local (principal) — garante que dados sobrevivem a refresh
-    try:
-        with open("planning.json", "w", encoding="utf-8") as f:
-            json.dump(pl.to_dict(), f, ensure_ascii=False, indent=2)
-    except Exception as e:
-        st.warning(f"⚠️ Erro ao salvar planning.json: {e}")
-    # Persistência remota (Neon)
+    # 1. Persistência local — SQLite (principal)
+    msg_sqlite = save_to_sqlite(pl)
+    if "❌" in msg_sqlite:
+        st.warning(f"⚠️ {msg_sqlite}")
+    # 2. Persistência remota — Neon (automático, sem bloqueio)
     msg = export_to_postgres(pl, DB_CONN_STR)
     if msg and "❌" in msg:
-        st.warning(f"BD: {msg}")
+        pass  # falha silenciosa — SQLite já salvou
 
 
 # ============================================
@@ -1376,7 +1469,7 @@ st.markdown("""
 
 with st.sidebar:
     st.markdown("## 📁 Arquivo")
-    uploaded = st.file_uploader("Abrir JSON", type=["json"], key="sidebar_uploader",
+    uploaded = st.file_uploader("Importar JSON", type=["json"], key="sidebar_uploader",
                                 label_visibility="collapsed")
     if uploaded:
         try:
@@ -1384,57 +1477,39 @@ with st.sidebar:
             st.session_state.planning = PlanningData.from_dict(data)
             planning = st.session_state.planning
             save_planning(planning)
-            st.success("JSON carregado e salvo!")
+            st.success("JSON importado e salvo!")
         except Exception as e:
             st.error(f"Erro: {e}")
-
-    st.download_button("⬇️ Exportar JSON", key="dl_json",
-        data=json.dumps(planning.to_dict(), ensure_ascii=False, indent=2).encode("utf-8"),
-        file_name="planning_export.json", mime="application/json")
-
-    if st.button("💾 Salvar planning.json", key="save_local"):
-        save_planning(planning)
-        st.success("Salvo!")
-
-    st.markdown("---")
-    st.markdown("## 💾 Persistência")
-    if os.path.exists("planning.json"):
-        mtime = datetime.fromtimestamp(os.path.getmtime("planning.json")).strftime("%d/%m %H:%M")
-        st.caption(f"📄 JSON local: ✅ ({mtime})")
-    else:
-        st.caption("📄 JSON local: ⚠️ nenhum arquivo")
-
-    # Status do banco de dados
-    if st.button("🔌 Testar conexão Neon", key="test_db"):
-        try:
-            _eng = create_engine(DB_CONN_STR, future=True)
-            with _eng.connect() as _c:
-                _c.execute(text("SELECT 1"))
-            st.success("🟢 Neon conectado!")
-        except Exception as e:
-            st.error(f"🔴 Falha: {e}")
 
     st.markdown("---")
     st.markdown("## 📦 Exportar")
 
-    if st.button("📊 Exportar Excel", key="btn_xlsx"):
-        xlsx = export_to_excel_bytes(planning)
-        st.download_button("⬇️ Baixar Excel", data=xlsx, key="dl_xlsx",
-            file_name="planning_multi_sheet.xlsx",
-            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+    xlsx = export_to_excel_bytes(planning)
+    st.download_button("📊 Baixar Excel", data=xlsx, key="dl_xlsx_sb",
+        file_name="planning_multi_sheet.xlsx",
+        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        use_container_width=True)
 
-    if st.button("🗜️ Exportar CSVs (ZIP)", key="btn_zip"):
-        z = export_to_csv_zip(planning)
-        st.download_button("⬇️ Baixar ZIP", data=z, key="dl_zip",
-            file_name="planning_csvs.zip", mime="application/zip")
+    st.download_button("⬇️ Exportar JSON", key="dl_json",
+        data=json.dumps(planning.to_dict(), ensure_ascii=False, indent=2).encode("utf-8"),
+        file_name="planning_export.json", mime="application/json",
+        use_container_width=True)
 
-    if st.button("📄 Gerar Relatório HTML", key="btn_html"):
-        html = build_html_report(planning)
-        st.download_button("⬇️ Baixar HTML", data=html.encode("utf-8"), key="dl_html",
-            file_name="relatorio_planejamento.html", mime="text/html")
-        st.success("Relatório pronto!")
-
-    # ===== SEÇÃO NEON REMOVIDA =====
+    st.markdown("---")
+    st.markdown("## 💾 Status")
+    _ts = sqlite_last_updated()
+    if _ts:
+        st.caption(f"🗄️ SQLite: ✅ ({_ts})")
+    else:
+        st.caption("🗄️ SQLite: ⚠️ vazio")
+    # Teste automático Neon (status apenas)
+    try:
+        _eng = create_engine(DB_CONN_STR, future=True)
+        with _eng.connect() as _c:
+            _c.execute(text("SELECT 1"))
+        st.caption("☁️ Neon: 🟢 conectado")
+    except Exception:
+        st.caption("☁️ Neon: 🔴 offline")
 
     st.markdown("---")
     st.markdown("## 💡 Sugestões de OKRs")
@@ -1627,17 +1702,25 @@ with tabs[2]:
 with tabs[3]:
     st.markdown('<div class="section-title">🏢 Áreas e Responsáveis</div>', unsafe_allow_html=True)
 
+    _resp_options = [p.nome for p in planning.partners] if planning.partners else []
+
     c1, c2 = st.columns([3, 2])
     with c1:
         n1, n2 = st.columns(2)
         area_n = n1.text_input("Área", key="ar_area")
-        resp   = n2.text_input("Responsável", key="ar_resp")
+        if _resp_options:
+            resp = n2.selectbox("Responsável", options=_resp_options + ["(outro)"], key="ar_resp")
+            if resp == "(outro)":
+                resp = n2.text_input("Nome do responsável", key="ar_resp_other")
+        else:
+            resp = n2.text_input("Responsável", key="ar_resp_txt")
         n3, n4 = st.columns(2)
         a_email = n3.text_input("E-mail", key="ar_email")
         a_obs   = n4.text_input("Observações", key="ar_obs")
         if st.button("➕ Adicionar Área", key="ar_add", type="primary"):
             if area_n.strip():
-                planning.areas.append(AreaResponsavel(area_n, resp, a_email, a_obs))
+                resp_val = resp if _resp_options and resp != "(outro)" else (resp if _resp_options else st.session_state.get("ar_resp_txt",""))
+                planning.areas.append(AreaResponsavel(area_n, resp_val, a_email, a_obs))
                 save_planning(planning)
                 st.success("Área adicionada!")
                 st.rerun()
@@ -1658,7 +1741,17 @@ with tabs[3]:
         st.markdown("**Tabela de áreas (editável)**")
         df_a = pd.DataFrame([asdict(a) for a in planning.areas])
         df_a.columns = ["Área","Responsável","E-mail","Observações"]
+        _resp_col_opts = [p.nome for p in planning.partners] if planning.partners else None
+        _area_col_config = {
+            "Área": st.column_config.TextColumn("Área", width="medium"),
+            "E-mail": st.column_config.TextColumn("E-mail", width="medium"),
+            "Observações": st.column_config.TextColumn("Observações", width="medium"),
+        }
+        if _resp_col_opts:
+            _area_col_config["Responsável"] = st.column_config.SelectboxColumn(
+                "Responsável", options=_resp_col_opts, width="medium")
         edited_a = try_data_editor(df_a, key="areas_editor", height=250,
+                                   column_config=_area_col_config,
                                    use_container_width=True, num_rows="dynamic")
         if edited_a is not None and st.button("💾 Salvar Áreas", key="ar_save"):
             planning.areas = []
@@ -1891,24 +1984,31 @@ with tabs[6]:
 
         fa1, fa2, fa3 = st.columns(3)
         novo_titulo = fa1.text_input("Título *", key="na_titulo")
-        novo_area   = fa2.selectbox("Área", options=area_opts + ["(outra)"], key="na_area") if area_opts                       else fa2.text_input("Área", key="na_area_txt")
-        novo_resp   = fa3.selectbox("Responsável", options=resp_opts + ["(outro)"], key="na_resp") if resp_opts                       else fa3.text_input("Responsável", key="na_resp_txt")
+        novo_okr    = fa2.selectbox("OKR vinculada", options=["(nenhuma)"] + okr_opts, key="na_okr") if okr_opts \
+                      else fa2.text_input("OKR vinculada", key="na_okr_txt")
+        novo_area   = fa3.selectbox("Área", options=area_opts + ["(outra)"], key="na_area") if area_opts \
+                      else fa3.text_input("Área", key="na_area_txt")
 
         fb1, fb2, fb3 = st.columns(3)
-        novo_inicio = fb1.date_input("Data Início", value=date.today(), key="na_inicio")
-        novo_venc   = fb2.date_input("Data Vencimento", value=date.today(), key="na_venc")
-        novo_status = fb3.selectbox("Status", ["Pendente","Em andamento","Concluído"], key="na_status")
+        novo_resp   = fb1.selectbox("Responsável", options=resp_opts + ["(outro)"], key="na_resp") if resp_opts \
+                      else fb1.text_input("Responsável", key="na_resp_txt")
+        novo_inicio = fb2.date_input("Data Início", value=date.today(), key="na_inicio")
+        novo_venc   = fb3.date_input("Data Vencimento", value=date.today(), key="na_venc")
 
-        fc1, fc2 = st.columns([2, 1])
-        novo_desc = fc1.text_input("Descrição", key="na_desc")
-        novo_obs  = fc2.text_input("Observações", key="na_obs")
+        fc1, fc2, fc3 = st.columns(3)
+        novo_status = fc1.selectbox("Status", ["Pendente","Em andamento","Concluído"], key="na_status")
+        novo_desc   = fc2.text_input("Descrição", key="na_desc")
+        novo_como   = fc3.text_input("Como Fazer", key="na_como")
+
+        novo_obs = st.text_input("Observações", key="na_obs")
 
         if st.button("➕ Adicionar Plano", key="na_add", type="primary"):
             if not novo_titulo.strip():
                 st.warning("Informe o Título do plano.")
             else:
-                area_val = novo_area if area_opts else st.session_state.get("na_area_txt","")
-                resp_val = novo_resp if resp_opts else st.session_state.get("na_resp_txt","")
+                area_val = novo_area if area_opts and novo_area != "(outra)" else st.session_state.get("na_area_txt","")
+                resp_val = novo_resp if resp_opts and novo_resp != "(outro)" else st.session_state.get("na_resp_txt","")
+                okr_val  = novo_okr if okr_opts and novo_okr != "(nenhuma)" else st.session_state.get("na_okr_txt","")
                 planning.actions.append(PlanoAcao(
                     titulo=novo_titulo.strip(),
                     area=area_val,
@@ -1918,10 +2018,15 @@ with tabs[6]:
                     data_vencimento=novo_venc.strftime("%Y-%m-%d"),
                     status=novo_status,
                     observacoes=novo_obs.strip(),
+                    okr=okr_val,
+                    como_fazer=novo_como.strip(),
                 ))
                 save_planning(planning)
                 st.success(f"Plano **{novo_titulo}** adicionado!")
                 st.rerun()
+
+    # ── Legenda semáforo ──
+    st.markdown("🟢 Concluído &nbsp;&nbsp; 🟡 Vence em ≤2 dias &nbsp;&nbsp; 🔴 Atrasado &nbsp;&nbsp; ⚪ No prazo")
 
     # ── Tabela editável ──
     st.markdown("**📋 Tabela de Planos (editável — clique na célula para alterar)**")
@@ -1934,26 +2039,41 @@ with tabs[6]:
         if _dcol in df_act.columns:
             df_act[_dcol] = pd.to_datetime(df_act[_dcol], errors="coerce").dt.date
 
-    # Usar st.data_editor diretamente — evita filtro do wrapper que remove num_rows
+    # Montar column_config com dropdowns dinâmicos
+    _act_area_opts = [a.area for a in planning.areas] if planning.areas else None
+    _act_okr_opts  = [o.nome for o in planning.okrs] if planning.okrs else None
+    _act_resp_opts = [p.nome for p in planning.partners] if planning.partners else None
+
+    _act_col_config = {
+        "":            st.column_config.TextColumn("", width="small", disabled=True),
+        "Título":      st.column_config.TextColumn("Título", width="large"),
+        "Descrição":   st.column_config.TextColumn("Descrição", width="large"),
+        "Como Fazer":  st.column_config.TextColumn("Como Fazer", width="large"),
+        "Início":      st.column_config.DateColumn("Início", format="DD/MM/YYYY"),
+        "Vencimento":  st.column_config.DateColumn("Vencimento", format="DD/MM/YYYY"),
+        "Status":      st.column_config.SelectboxColumn("Status",
+                           options=["Pendente","Em andamento","Concluído"],
+                           required=True, width="small"),
+        "Observações": st.column_config.TextColumn("Observações", width="medium"),
+        "Excluir":     st.column_config.CheckboxColumn("Excluir", width="small"),
+    }
+    if _act_area_opts:
+        _act_col_config["Área"] = st.column_config.SelectboxColumn(
+            "Área", options=_act_area_opts, width="medium")
+    if _act_okr_opts:
+        _act_col_config["OKR"] = st.column_config.SelectboxColumn(
+            "OKR", options=_act_okr_opts, width="medium")
+    if _act_resp_opts:
+        _act_col_config["Responsável"] = st.column_config.SelectboxColumn(
+            "Responsável", options=_act_resp_opts, width="medium")
+
     edited_act = st.data_editor(
         df_act,
         key="actions_editor",
         height=420,
         use_container_width=True,
         num_rows="dynamic",
-        column_config={
-            "Título":      st.column_config.TextColumn("Título", width="large"),
-            "Área":        st.column_config.TextColumn("Área", width="medium"),
-            "Responsável": st.column_config.TextColumn("Responsável", width="medium"),
-            "Descrição":   st.column_config.TextColumn("Descrição", width="large"),
-            "Início":      st.column_config.DateColumn("Início", format="DD/MM/YYYY"),
-            "Vencimento":  st.column_config.DateColumn("Vencimento", format="DD/MM/YYYY"),
-            "Status":      st.column_config.SelectboxColumn("Status",
-                               options=["Pendente","Em andamento","Concluído"],
-                               required=True, width="small"),
-            "Observações": st.column_config.TextColumn("Observações", width="medium"),
-            "Excluir":     st.column_config.CheckboxColumn("Excluir", width="small"),
-        },
+        column_config=_act_col_config,
         hide_index=True,
     )
 
