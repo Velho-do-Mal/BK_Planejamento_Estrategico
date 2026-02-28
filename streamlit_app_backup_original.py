@@ -29,44 +29,23 @@ import plotly.express as px
 from plotly.subplots import make_subplots
 import streamlit as st
 from sqlalchemy import create_engine, text
-from sqlalchemy.pool import NullPool
 
 # ============================================
 # CONFIGURAÇÃO DO BANCO DE DADOS (Neon)
 # ============================================
-_DB_CONN_FALLBACK = "postgresql://neondb_owner:npg_TiJv0WHSG7pU@ep-jolly-heart-ahj739cl-pooler.c-3.us-east-1.aws.neon.tech/neondb?sslmode=require"
-
-def _sanitize_conn_str(conn_str: str) -> str:
-    """
-    Remove parâmetros incompatíveis com pgBouncer (pooler Neon).
-    channel_binding=require NÃO é suportado pelo pgBouncer e causa falha silenciosa
-    de autenticação SCRAM-SHA-256. Deve ser removido da URL antes de criar o engine.
-    """
-    import urllib.parse
-    try:
-        parsed = urllib.parse.urlparse(conn_str)
-        params = urllib.parse.parse_qs(parsed.query, keep_blank_values=True)
-        # Parâmetros que o pgBouncer não suporta
-        for incompatible in ("channel_binding", "options"):
-            params.pop(incompatible, None)
-        new_query = urllib.parse.urlencode(
-            {k: v[0] for k, v in params.items()}, safe="")
-        fixed = parsed._replace(query=new_query)
-        return urllib.parse.urlunparse(fixed)
-    except Exception:
-        return conn_str
+_DB_CONN_FALLBACK = "postgresql://neondb_owner:npg_TiJv0WHSG7pU@ep-jolly-heart-ahj739cl-pooler.c-3.us-east-1.aws.neon.tech/neondb?sslmode=require&channel_binding=require"
 
 def _get_db_conn_str() -> str:
-    """Retorna connection string sanitizada: secrets.toml > env var > hardcoded fallback."""
+    """Retorna connection string: secrets.toml > env var > hardcoded fallback."""
     try:
         secret = st.secrets.get("neon", {}).get("connection", "")
         if secret and secret.strip():
-            return _sanitize_conn_str(secret.strip())
+            return secret.strip()
     except Exception:
         pass
     env = os.environ.get("NEON_DATABASE_URL", "")
     if env:
-        return _sanitize_conn_str(env)
+        return env
     return _DB_CONN_FALLBACK
 
 # Será resolvido após st estar disponível
@@ -333,27 +312,20 @@ def export_to_excel_bytes(planning: PlanningData) -> bytes:
     buf.seek(0)
     return buf.read()
 
-def _make_pg_engine(conn_str: str):
-    """Cria engine SQLAlchemy robusto para Neon/pgBouncer + Streamlit Cloud.
-    NullPool: obrigatório no Streamlit — cada rerun cria nova conexão, pool persistente
-              causa "connection already closed" e vazamentos no Neon free tier.
-    connect_timeout: evita travamento quando Neon acorda do sleep (free tier ~5s).
-    """
-    conn_str = _sanitize_conn_str(conn_str)
-    return create_engine(
-        conn_str,
-        poolclass=NullPool,
-        connect_args={"connect_timeout": 20},
-    )
-
-
 def export_to_postgres(planning: PlanningData, conn_str: str = "") -> str:
     if not conn_str:
-        conn_str = _get_db_conn_str()
+        conn_str = os.environ.get("NEON_DATABASE_URL", "")
+        try:
+            if hasattr(st, "secrets"):
+                neon_secret = st.secrets.get("neon", {}).get("connection")
+                if neon_secret:
+                    conn_str = neon_secret
+        except Exception:
+            pass
     if not conn_str:
         return "❌ Connection string vazia. Configure NEON_DATABASE_URL ou st.secrets['neon']['connection']."
     try:
-        engine = _make_pg_engine(conn_str)
+        engine = create_engine(conn_str, future=True)
     except Exception as e:
         return f"❌ Erro ao criar engine: {e}"
 
@@ -486,7 +458,7 @@ def export_to_postgres(planning: PlanningData, conn_str: str = "") -> str:
 def load_from_postgres(conn_str: str) -> Optional[PlanningData]:
     """Carrega dados do PostgreSQL e retorna um objeto PlanningData."""
     try:
-        engine = _make_pg_engine(conn_str)
+        engine = create_engine(conn_str, future=True)
         with engine.connect() as conn:
             # Verifica se as tabelas existem
             check = conn.execute(text(
@@ -574,7 +546,7 @@ def load_from_postgres(conn_str: str) -> Optional[PlanningData]:
 # PERSISTÊNCIA LOCAL — SQLite
 # ============================================
 
-SQLITE_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "bk_planejamento.db")
+SQLITE_PATH = "bk_planejamento.db"
 
 def _sqlite_conn():
     return sqlite3.connect(SQLITE_PATH)
@@ -1445,59 +1417,38 @@ details summary {
 
 if "planning" not in st.session_state:
     planning = None
-    _neon_load_error = None
-
-    # ── PRIORIDADE 1: Neon PostgreSQL ──────────────────────────────────────────
-    # No Streamlit Cloud o filesystem é EFÊMERO: SQLite some a cada restart/sleep.
-    # Neon é o único storage verdadeiramente persistente — deve ser carregado primeiro.
-    try:
-        planning = load_from_postgres(DB_CONN_STR)
-    except Exception as _e:
-        _neon_load_error = str(_e)
-        planning = None
-
-    # ── PRIORIDADE 2: SQLite local (cache — útil em dev local ou deploy custom) ─
-    if planning is None:
-        planning = load_from_sqlite()
-
-    # ── PRIORIDADE 3: planning.json legado ────────────────────────────────────
-    if planning is None and os.path.exists(
-            os.path.join(os.path.dirname(os.path.abspath(__file__)), "planning.json")):
+    # 1. SQLite local (principal — sempre atualizado pelo save_planning)
+    planning = load_from_sqlite()
+    # 2. Retrocompatibilidade: se tiver planning.json antigo, migra para SQLite
+    if planning is None and os.path.exists("planning.json"):
         try:
-            _json_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "planning.json")
-            with open(_json_path, "r", encoding="utf-8") as f:
+            with open("planning.json", "r", encoding="utf-8") as f:
                 data = json.load(f)
             planning = PlanningData.from_dict(data)
-            save_to_sqlite(planning)  # cache local
+            save_to_sqlite(planning)  # migra para SQLite
         except Exception:
             planning = None
-
-    # ── ÚLTIMO RECURSO: dados vazios ──────────────────────────────────────────
+    # 3. Neon (nuvem — fallback)
+    if planning is None:
+        planning = load_from_postgres(DB_CONN_STR)
+    # 4. Último recurso: dados vazios
     if planning is None:
         planning = PlanningData()
-
     st.session_state.planning = planning
-    st.session_state["_neon_load_error"] = _neon_load_error
 
 planning: PlanningData = st.session_state.planning
 
 def save_planning(pl: PlanningData):
-    """Salva no session_state, persiste em SQLite (cache) e sincroniza com Neon (principal)."""
+    """Salva no session_state, persiste em SQLite local e sincroniza com Neon."""
     st.session_state.planning = pl
-
-    # ── Neon PostgreSQL (storage principal — único persistente no Streamlit Cloud) ──
-    msg_neon = export_to_postgres(pl, DB_CONN_STR)
-    st.session_state["_last_neon_save"] = msg_neon
-    if msg_neon and "❌" in msg_neon:
-        st.error(
-            f"❌ **ATENÇÃO: Dados NÃO foram salvos na nuvem!**\n\n"
-            f"Erro Neon: `{msg_neon}`\n\n"
-            f"Verifique a aba **☁️ Diagnóstico** na barra lateral."
-        )
-    # ── SQLite local (cache — perde no restart do Streamlit Cloud) ──
+    # 1. Persistência local — SQLite (principal)
     msg_sqlite = save_to_sqlite(pl)
     if "❌" in msg_sqlite:
-        st.warning(f"⚠️ Cache local (SQLite): {msg_sqlite}")
+        st.warning(f"⚠️ {msg_sqlite}")
+    # 2. Persistência remota — Neon (automático, sem bloqueio)
+    msg = export_to_postgres(pl, DB_CONN_STR)
+    if msg and "❌" in msg:
+        pass  # falha silenciosa — SQLite já salvou
 
 
 # ============================================
@@ -1510,15 +1461,6 @@ st.markdown("""
     <p>Planejamento Estratégico 36 meses — BK Engenharia e Tecnologia</p>
 </div>
 """, unsafe_allow_html=True)
-
-# Banner de alerta se Neon estava inacessível ao carregar
-_neon_load_err = st.session_state.get("_neon_load_error")
-if _neon_load_err:
-    st.error(
-        "⚠️ **Banco de dados Neon inacessível ao iniciar.** "
-        "Os dados exibidos podem estar desatualizados ou vazios. "
-        "Use **🔄 Forçar Sync** na barra lateral após verificar a conexão."
-    )
 
 
 # ============================================
@@ -1554,54 +1496,20 @@ with st.sidebar:
         use_container_width=True)
 
     st.markdown("---")
-    st.markdown("## 💾 Status & Diagnóstico")
-
-    # ── Status Neon ──
-    _neon_ok = False
-    _neon_err_detail = ""
-    try:
-        _eng = _make_pg_engine(DB_CONN_STR)
-        with _eng.connect() as _c:
-            _c.execute(text("SELECT 1"))
-        _neon_ok = True
-        st.success("☁️ Neon: 🟢 Conectado")
-    except Exception as _e:
-        _neon_err_detail = str(_e)
-        st.error(f"☁️ Neon: 🔴 Offline")
-        with st.expander("Ver erro completo"):
-            st.code(_neon_err_detail, language="text")
-
-    # ── Status SQLite ──
+    st.markdown("## 💾 Status")
     _ts = sqlite_last_updated()
     if _ts:
-        st.caption(f"🗄️ Cache local: ✅ {_ts}")
+        st.caption(f"🗄️ SQLite: ✅ ({_ts})")
     else:
-        st.caption("🗄️ Cache local: vazio (normal no Streamlit Cloud)")
-
-    # ── Aviso se carregamento falhou ──
-    _neon_load_err = st.session_state.get("_neon_load_error")
-    if _neon_load_err:
-        st.warning("⚠️ Neon indisponível ao iniciar — dados podem estar desatualizados.")
-
-    # ── Botão Force Sync ──
-    if st.button("🔄 Forçar Sync → Neon", key="force_sync_neon",
-                 use_container_width=True, type="primary"):
-        _sync_msg = export_to_postgres(st.session_state.planning, DB_CONN_STR)
-        if "✅" in _sync_msg:
-            st.success(_sync_msg)
-        else:
-            st.error(_sync_msg)
-
-    # ── Botão recarregar do Neon ──
-    if st.button("⬇️ Recarregar do Neon", key="reload_neon",
-                 use_container_width=True):
-        _reloaded = load_from_postgres(DB_CONN_STR)
-        if _reloaded:
-            st.session_state.planning = _reloaded
-            st.success("✅ Dados recarregados do Neon!")
-            st.rerun()
-        else:
-            st.error("Neon vazio ou inacessível.")
+        st.caption("🗄️ SQLite: ⚠️ vazio")
+    # Teste automático Neon (status apenas)
+    try:
+        _eng = create_engine(DB_CONN_STR, future=True)
+        with _eng.connect() as _c:
+            _c.execute(text("SELECT 1"))
+        st.caption("☁️ Neon: 🟢 conectado")
+    except Exception:
+        st.caption("☁️ Neon: 🔴 offline")
 
     st.markdown("---")
     st.markdown("## 💡 Sugestões de OKRs")
