@@ -387,8 +387,12 @@ def export_to_postgres(planning: PlanningData, conn_str: str = "") -> str:
             for ddl in ddl_statements:
                 conn.execute(text(ddl))
 
-            # Garantir que colunas novas existam em tabelas antigas
-            for _col, _def in [("okr", "TEXT DEFAULT ''"), ("como_fazer", "TEXT DEFAULT ''")]:
+            # Garantir que colunas novas existam em tabelas antigas (migrações cumulativas)
+            for _col, _def in [
+                ("okr",         "TEXT DEFAULT ''"),
+                ("como_fazer",  "TEXT DEFAULT ''"),
+                ("data_inicio", "DATE"),   # adicionada em v2 — pode não existir em BDs criados antes
+            ]:
                 try:
                     conn.execute(text(f"ALTER TABLE actions ADD COLUMN IF NOT EXISTS {_col} {_def}"))
                 except Exception:
