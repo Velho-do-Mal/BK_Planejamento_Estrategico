@@ -5,7 +5,7 @@ BK_Planejamento_Estrategico v2.0 — Layout e UX aprimorados
 - Tabelas 100% editáveis (estilo Excel) com st.data_editor
 - Gráficos modernos com Plotly (dark theme + cores BK)
 - SWOT visual 4-quadrantes
-- OKRs: previsto vs realizado, tendência, gauge de performance
+- KPIs: previsto vs realizado, tendência, gauge de performance
 - Planos de Ação: kanban-style analytics + timeline
 - Relatório HTML moderno + exportação .docx integrada
 - Correções: build_example, StrategicInfo seguro, conn_str mascarada, typos
@@ -118,27 +118,27 @@ class SWOTItem:
     prioridade: str
 
 @dataclass
-class OKRMonthData:
+class KPIMonthData:
     ano: int
     mes: int
     previsto: float = 0.0
     realizado: float = 0.0
 
 @dataclass
-class OKR:
+class KPI:
     nome: str
     area: str
     unidade: str
     descricao: str = ""
     inicio_ano: int = field(default_factory=lambda: date.today().year)
     inicio_mes: int = field(default_factory=lambda: date.today().month)
-    meses: List[OKRMonthData] = field(default_factory=list)
+    meses: List[KPIMonthData] = field(default_factory=list)
 
     def __post_init__(self):
         if not self.meses:
             ano, mes = self.inicio_ano, self.inicio_mes
             for _ in range(36):
-                self.meses.append(OKRMonthData(ano=ano, mes=mes))
+                self.meses.append(KPIMonthData(ano=ano, mes=mes))
                 mes += 1
                 if mes > 12:
                     mes = 1
@@ -154,7 +154,7 @@ class PlanoAcao:
     data_vencimento: str
     status: str = "Pendente"
     observacoes: str = ""
-    okr: str = ""
+    KPI: str = ""
     como_fazer: str = ""
 
 @dataclass
@@ -163,7 +163,7 @@ class PlanningData:
     partners: List[Partner] = field(default_factory=list)
     areas: List[AreaResponsavel] = field(default_factory=list)
     swot: List[SWOTItem] = field(default_factory=list)
-    okrs: List[OKR] = field(default_factory=list)
+    KPIs: List[KPI] = field(default_factory=list)
     actions: List[PlanoAcao] = field(default_factory=list)
 
     def to_dict(self) -> Dict[str, Any]:
@@ -172,10 +172,10 @@ class PlanningData:
             "partners": [asdict(p) for p in self.partners],
             "areas": [asdict(a) for a in self.areas],
             "swot": [asdict(s) for s in self.swot],
-            "okrs": [
+            "KPIs": [
                 {**{k: v for k, v in asdict(o).items() if k != "meses"},
                  "meses": [asdict(m) for m in o.meses]}
-                for o in self.okrs
+                for o in self.KPIs
             ],
             "actions": [asdict(ac) for ac in self.actions],
         }
@@ -203,27 +203,27 @@ class PlanningData:
             try: pd_obj.swot.append(SWOTItem(**s))
             except Exception: pass
 
-        for o in data.get("okrs", []):
+        for o in data.get("KPIs", []):
             try:
-                meses = [OKRMonthData(**m) for m in o.get("meses", [])]
+                meses = [KPIMonthData(**m) for m in o.get("meses", [])]
                 o_copy = {k: v for k, v in o.items() if k != "meses"}
-                okr = OKR(**o_copy)
+                KPI = KPI(**o_copy)
                 if meses:
-                    okr.meses = meses
-                if len(okr.meses) != 36:
-                    existing = {(int(m.ano), int(m.mes)): m for m in okr.meses}
-                    okr.meses = []
-                    ano, mes = int(okr.inicio_ano), int(okr.inicio_mes)
+                    KPI.meses = meses
+                if len(KPI.meses) != 36:
+                    existing = {(int(m.ano), int(m.mes)): m for m in KPI.meses}
+                    KPI.meses = []
+                    ano, mes = int(KPI.inicio_ano), int(KPI.inicio_mes)
                     for _ in range(36):
                         key = (ano, mes)
                         if key in existing:
                             mm = existing[key]
-                            okr.meses.append(OKRMonthData(ano=ano, mes=mes, previsto=float(mm.previsto), realizado=float(mm.realizado)))
+                            KPI.meses.append(KPIMonthData(ano=ano, mes=mes, previsto=float(mm.previsto), realizado=float(mm.realizado)))
                         else:
-                            okr.meses.append(OKRMonthData(ano=ano, mes=mes))
+                            KPI.meses.append(KPIMonthData(ano=ano, mes=mes))
                         mes += 1
                         if mes > 12: mes, ano = 1, ano + 1
-                pd_obj.okrs.append(okr)
+                pd_obj.KPIs.append(KPI)
             except Exception:
                 pass
 
@@ -232,7 +232,7 @@ class PlanningData:
                 if "data_inicio" not in ac:
                     ac = {**ac, "data_inicio": ac.get("data_vencimento", date.today().strftime("%Y-%m-%d"))}
                 # Garante campos novos (retrocompatibilidade)
-                ac.setdefault("okr", "")
+                ac.setdefault("KPI", "")
                 ac.setdefault("como_fazer", "")
                 pd_obj.actions.append(PlanoAcao(**ac))
             except Exception:
@@ -243,7 +243,7 @@ class PlanningData:
                         data_inicio=ac.get("data_inicio", date.today().strftime("%Y-%m-%d")),
                         data_vencimento=ac.get("data_vencimento", date.today().strftime("%Y-%m-%d")),
                         status=ac.get("status","Pendente"), observacoes=ac.get("observacoes",""),
-                        okr=ac.get("okr",""), como_fazer=ac.get("como_fazer","")
+                        KPI=ac.get("KPI",""), como_fazer=ac.get("como_fazer","")
                     ))
                 except Exception:
                     pass
@@ -259,9 +259,9 @@ def build_example() -> "PlanningData":
 # UTILITÁRIOS DE DADOS / EXPORT
 # ============================================
 
-def okr_to_dataframe(okr: OKR) -> pd.DataFrame:
+def KPI_to_dataframe(KPI: KPI) -> pd.DataFrame:
     rows = []
-    for i, m in enumerate(okr.meses, start=1):
+    for i, m in enumerate(KPI.meses, start=1):
         rows.append({"m_index": i, "ano": m.ano, "mes": m.mes,
                      "previsto": m.previsto, "realizado": m.realizado})
     return pd.DataFrame(rows)
@@ -270,18 +270,18 @@ def planning_to_dataframes(planning: PlanningData) -> Dict[str, pd.DataFrame]:
     df_partners = pd.DataFrame([asdict(p) for p in planning.partners]) if planning.partners else pd.DataFrame(columns=["nome","cargo","email","telefone","observacoes"])
     df_areas = pd.DataFrame([asdict(a) for a in planning.areas]) if planning.areas else pd.DataFrame(columns=["area","responsavel","email","observacoes"])
     df_swot = pd.DataFrame([asdict(s) for s in planning.swot]) if planning.swot else pd.DataFrame(columns=["tipo","descricao","prioridade"])
-    okr_rows, okrmes_rows = [], []
-    for idx, o in enumerate(planning.okrs, start=1):
-        okr_rows.append({"okr_id": idx, "nome": o.nome, "area": o.area, "unidade": o.unidade,
+    KPI_rows, KPImes_rows = [], []
+    for idx, o in enumerate(planning.KPIs, start=1):
+        KPI_rows.append({"KPI_id": idx, "nome": o.nome, "area": o.area, "unidade": o.unidade,
                          "descricao": o.descricao, "inicio_ano": o.inicio_ano, "inicio_mes": o.inicio_mes})
         for i, m in enumerate(o.meses, start=1):
-            okrmes_rows.append({"okr_id": idx, "idx_mes": i, "ano": m.ano, "mes": m.mes,
+            KPImes_rows.append({"KPI_id": idx, "idx_mes": i, "ano": m.ano, "mes": m.mes,
                                  "previsto": m.previsto, "realizado": m.realizado})
-    df_okr = pd.DataFrame(okr_rows) if okr_rows else pd.DataFrame(columns=["okr_id","nome","area","unidade","descricao","inicio_ano","inicio_mes"])
-    df_okr_mes = pd.DataFrame(okrmes_rows) if okrmes_rows else pd.DataFrame(columns=["okr_id","idx_mes","ano","mes","previsto","realizado"])
-    df_actions = pd.DataFrame([asdict(a) for a in planning.actions]) if planning.actions else pd.DataFrame(columns=["titulo","area","responsavel","descricao","data_inicio","data_vencimento","status","observacoes","okr","como_fazer"])
+    df_KPI = pd.DataFrame(KPI_rows) if KPI_rows else pd.DataFrame(columns=["KPI_id","nome","area","unidade","descricao","inicio_ano","inicio_mes"])
+    df_KPI_mes = pd.DataFrame(KPImes_rows) if KPImes_rows else pd.DataFrame(columns=["KPI_id","idx_mes","ano","mes","previsto","realizado"])
+    df_actions = pd.DataFrame([asdict(a) for a in planning.actions]) if planning.actions else pd.DataFrame(columns=["titulo","area","responsavel","descricao","data_inicio","data_vencimento","status","observacoes","KPI","como_fazer"])
     return {"partners": df_partners, "areas": df_areas, "swot": df_swot,
-            "okrs": df_okr, "okr_mes": df_okr_mes, "actions": df_actions}
+            "KPIs": df_KPI, "KPI_mes": df_KPI_mes, "actions": df_actions}
 
 def export_to_csv_zip(planning: PlanningData) -> bytes:
     dfs = planning_to_dataframes(planning)
@@ -343,15 +343,15 @@ def export_to_postgres(planning: PlanningData, conn_str: str = "") -> str:
            responsavel TEXT, email TEXT, observacoes TEXT, UNIQUE (area));""",
         """CREATE TABLE IF NOT EXISTS swot (id SERIAL PRIMARY KEY, tipo TEXT NOT NULL,
            descricao TEXT NOT NULL, prioridade TEXT NOT NULL, UNIQUE (tipo, descricao));""",
-        """CREATE TABLE IF NOT EXISTS okr (id SERIAL PRIMARY KEY, nome TEXT NOT NULL,
+        """CREATE TABLE IF NOT EXISTS KPI (id SERIAL PRIMARY KEY, nome TEXT NOT NULL,
            area TEXT, unidade TEXT, descricao TEXT, inicio_ano INTEGER, inicio_mes INTEGER, UNIQUE (nome));""",
-        """CREATE TABLE IF NOT EXISTS okr_mes (id SERIAL PRIMARY KEY,
-           okr_id INTEGER NOT NULL REFERENCES okr(id) ON DELETE CASCADE,
+        """CREATE TABLE IF NOT EXISTS KPI_mes (id SERIAL PRIMARY KEY,
+           KPI_id INTEGER NOT NULL REFERENCES KPI(id) ON DELETE CASCADE,
            idx_mes INTEGER NOT NULL, ano INTEGER NOT NULL, mes INTEGER NOT NULL,
-           previsto DOUBLE PRECISION NOT NULL, realizado DOUBLE PRECISION NOT NULL, UNIQUE (okr_id, idx_mes));""",
+           previsto DOUBLE PRECISION NOT NULL, realizado DOUBLE PRECISION NOT NULL, UNIQUE (KPI_id, idx_mes));""",
         """CREATE TABLE IF NOT EXISTS actions (id SERIAL PRIMARY KEY, titulo TEXT NOT NULL,
            area TEXT, responsavel TEXT, descricao TEXT, data_inicio DATE, data_vencimento DATE,
-           status TEXT NOT NULL, observacoes TEXT, okr TEXT DEFAULT '', como_fazer TEXT DEFAULT '',
+           status TEXT NOT NULL, observacoes TEXT, KPI TEXT DEFAULT '', como_fazer TEXT DEFAULT '',
            UNIQUE (titulo, data_vencimento));""",
     ]
     try:
@@ -360,7 +360,7 @@ def export_to_postgres(planning: PlanningData, conn_str: str = "") -> str:
                 conn.execute(text(ddl))
 
             # Garantir que colunas novas existam em tabelas antigas
-            for _col, _def in [("okr", "TEXT DEFAULT ''"), ("como_fazer", "TEXT DEFAULT ''")]:
+            for _col, _def in [("KPI", "TEXT DEFAULT ''"), ("como_fazer", "TEXT DEFAULT ''")]:
                 try:
                     conn.execute(text(f"ALTER TABLE actions ADD COLUMN IF NOT EXISTS {_col} {_def}"))
                 except Exception:
@@ -405,22 +405,22 @@ def export_to_postgres(planning: PlanningData, conn_str: str = "") -> str:
                     VALUES (:tipo,:descricao,:prioridade)"""),
                     {"tipo":sw.tipo,"descricao":sw.descricao,"prioridade":sw.prioridade})
 
-            # ── OKRs (delete cascade limpa okr_mes junto) ──
-            conn.execute(text("DELETE FROM okr_mes"))
-            conn.execute(text("DELETE FROM okr"))
-            for o in planning.okrs:
-                res = conn.execute(text("""INSERT INTO okr (nome,area,unidade,descricao,inicio_ano,inicio_mes)
+            # ── KPIs (delete cascade limpa KPI_mes junto) ──
+            conn.execute(text("DELETE FROM KPI_mes"))
+            conn.execute(text("DELETE FROM KPI"))
+            for o in planning.KPIs:
+                res = conn.execute(text("""INSERT INTO KPI (nome,area,unidade,descricao,inicio_ano,inicio_mes)
                     VALUES (:nome,:area,:unidade,:descricao,:inicio_ano,:inicio_mes)
                     RETURNING id"""),
                     {"nome":o.nome,"area":o.area,"unidade":o.unidade,"descricao":o.descricao,
                      "inicio_ano":o.inicio_ano,"inicio_mes":o.inicio_mes})
                 row = res.fetchone()
-                okr_id = row[0] if row else None
-                if okr_id:
+                KPI_id = row[0] if row else None
+                if KPI_id:
                     for idx, m in enumerate(o.meses, start=1):
-                        conn.execute(text("""INSERT INTO okr_mes (okr_id,idx_mes,ano,mes,previsto,realizado)
-                            VALUES (:okr_id,:idx_mes,:ano,:mes,:previsto,:realizado)"""),
-                            {"okr_id":okr_id,"idx_mes":idx,"ano":m.ano,"mes":m.mes,
+                        conn.execute(text("""INSERT INTO KPI_mes (KPI_id,idx_mes,ano,mes,previsto,realizado)
+                            VALUES (:KPI_id,:idx_mes,:ano,:mes,:previsto,:realizado)"""),
+                            {"KPI_id":KPI_id,"idx_mes":idx,"ano":m.ano,"mes":m.mes,
                              "previsto":m.previsto,"realizado":m.realizado})
 
             # ── Actions ──
@@ -439,12 +439,12 @@ def export_to_postgres(planning: PlanningData, conn_str: str = "") -> str:
                         datetime.strptime(di, "%Y-%m-%d")
                     except Exception:
                         di = dv
-                conn.execute(text("""INSERT INTO actions (titulo,area,responsavel,descricao,data_inicio,data_vencimento,status,observacoes,okr,como_fazer)
-                    VALUES (:titulo,:area,:responsavel,:descricao,:data_inicio,:data_vencimento,:status,:observacoes,:okr,:como_fazer)"""),
+                conn.execute(text("""INSERT INTO actions (titulo,area,responsavel,descricao,data_inicio,data_vencimento,status,observacoes,KPI,como_fazer)
+                    VALUES (:titulo,:area,:responsavel,:descricao,:data_inicio,:data_vencimento,:status,:observacoes,:KPI,:como_fazer)"""),
                     {"titulo":ac.titulo,"area":ac.area,"responsavel":ac.responsavel,"descricao":ac.descricao,
                      "data_inicio":di,"data_vencimento":dv,
                      "status":ac.status,"observacoes":ac.observacoes,
-                     "okr":getattr(ac,"okr",""),"como_fazer":getattr(ac,"como_fazer","")})
+                     "KPI":getattr(ac,"KPI",""),"como_fazer":getattr(ac,"como_fazer","")})
 
         return "✅ Exportação para PostgreSQL (Neon) concluída com sucesso."
     except Exception as e:
@@ -462,7 +462,7 @@ def load_from_postgres(conn_str: str) -> Optional[PlanningData]:
         with engine.connect() as conn:
             # Verifica se as tabelas existem
             check = conn.execute(text(
-                "SELECT tablename FROM pg_tables WHERE schemaname='public' AND tablename='okr'"))
+                "SELECT tablename FROM pg_tables WHERE schemaname='public' AND tablename='KPI'"))
             if check.fetchone() is None:
                 return None  # BD vazio — sem tabelas criadas ainda
 
@@ -482,9 +482,9 @@ def load_from_postgres(conn_str: str) -> Optional[PlanningData]:
             df_partners = pd.read_sql("SELECT nome,cargo,email,telefone,observacoes FROM partners", conn)
             df_areas = pd.read_sql("SELECT area,responsavel,email,observacoes FROM areas", conn)
             df_swot = pd.read_sql("SELECT tipo,descricao,prioridade FROM swot", conn)
-            df_actions = pd.read_sql("SELECT titulo,area,responsavel,descricao,data_inicio,data_vencimento,status,observacoes,COALESCE(okr,'') as okr,COALESCE(como_fazer,'') as como_fazer FROM actions", conn)
-            df_okr = pd.read_sql("SELECT id,nome,area,unidade,descricao,inicio_ano,inicio_mes FROM okr", conn)
-            df_okr_mes = pd.read_sql("SELECT okr_id,idx_mes,ano,mes,previsto,realizado FROM okr_mes ORDER BY okr_id, idx_mes", conn)
+            df_actions = pd.read_sql("SELECT titulo,area,responsavel,descricao,data_inicio,data_vencimento,status,observacoes,COALESCE(KPI,'') as KPI,COALESCE(como_fazer,'') as como_fazer FROM actions", conn)
+            df_KPI = pd.read_sql("SELECT id,nome,area,unidade,descricao,inicio_ano,inicio_mes FROM KPI", conn)
+            df_KPI_mes = pd.read_sql("SELECT KPI_id,idx_mes,ano,mes,previsto,realizado FROM KPI_mes ORDER BY KPI_id, idx_mes", conn)
 
         # Constrói objetos
         partners = [Partner(**row) for _, row in df_partners.iterrows()]
@@ -505,35 +505,35 @@ def load_from_postgres(conn_str: str) -> Optional[PlanningData]:
                     act[dcol] = date.today().strftime("%Y-%m-%d")
             actions.append(PlanoAcao(**act))
 
-        okrs = []
-        for _, okr_row in df_okr.iterrows():
-            okr_id = okr_row["id"]
-            meses_df = df_okr_mes[df_okr_mes["okr_id"] == okr_id].sort_values("idx_mes")
+        KPIs = []
+        for _, KPI_row in df_KPI.iterrows():
+            KPI_id = KPI_row["id"]
+            meses_df = df_KPI_mes[df_KPI_mes["KPI_id"] == KPI_id].sort_values("idx_mes")
             meses = []
             for _, mrow in meses_df.iterrows():
-                meses.append(OKRMonthData(
+                meses.append(KPIMonthData(
                     ano=int(mrow["ano"]),
                     mes=int(mrow["mes"]),
                     previsto=float(mrow["previsto"]),
                     realizado=float(mrow["realizado"])
                 ))
-            okr = OKR(
-                nome=okr_row["nome"],
-                area=okr_row["area"] or "",
-                unidade=okr_row["unidade"] or "",
-                descricao=okr_row["descricao"] or "",
-                inicio_ano=int(okr_row["inicio_ano"]),
-                inicio_mes=int(okr_row["inicio_mes"]),
+            KPI = KPI(
+                nome=KPI_row["nome"],
+                area=KPI_row["area"] or "",
+                unidade=KPI_row["unidade"] or "",
+                descricao=KPI_row["descricao"] or "",
+                inicio_ano=int(KPI_row["inicio_ano"]),
+                inicio_mes=int(KPI_row["inicio_mes"]),
                 meses=meses
             )
-            okrs.append(okr)
+            KPIs.append(KPI)
 
         planning = PlanningData(
             strategic=strategic,
             partners=partners,
             areas=areas,
             swot=swot,
-            okrs=okrs,
+            KPIs=KPIs,
             actions=actions
         )
         return planning
@@ -676,17 +676,17 @@ def _fig_layout(fig, title="", height=380, xangle=-30):
     fig.update_yaxes(gridcolor="#E0E7EF", showgrid=True, zeroline=False)
     return fig
 
-def fig_okr_monthly(okr: OKR) -> go.Figure:
-    labels = _month_labels_for_okr(okr)
-    prev  = [float(okr.meses[k].previsto)  if k < len(okr.meses) else 0.0 for k in range(36)]
-    real  = [float(okr.meses[k].realizado) if k < len(okr.meses) else 0.0 for k in range(36)]
+def fig_KPI_monthly(KPI: KPI) -> go.Figure:
+    labels = _month_labels_for_KPI(KPI)
+    prev  = [float(KPI.meses[k].previsto)  if k < len(KPI.meses) else 0.0 for k in range(36)]
+    real  = [float(KPI.meses[k].realizado) if k < len(KPI.meses) else 0.0 for k in range(36)]
     diff  = [r - p for r, p in zip(real, prev)]
 
     fig = make_subplots(
         rows=2, cols=1, shared_xaxes=True,
         row_heights=[0.7, 0.3],
         vertical_spacing=0.08,
-        subplot_titles=[f"{okr.nome} — Previsto vs Realizado", "Diferença mensal"]
+        subplot_titles=[f"{KPI.nome} — Previsto vs Realizado", "Diferença mensal"]
     )
     fig.add_trace(go.Bar(x=labels, y=prev, name="Previsto", marker_color=BK_BLUE_LIGHT, opacity=0.85), row=1, col=1)
     fig.add_trace(go.Bar(x=labels, y=real, name="Realizado", marker_color=BK_TEAL, opacity=0.9), row=1, col=1)
@@ -713,10 +713,10 @@ def fig_okr_monthly(okr: OKR) -> go.Figure:
     fig.update_yaxes(gridcolor="#E0E7EF", zeroline=True, zerolinecolor="#ccc")
     return fig
 
-def fig_okr_cumulative(okr: OKR) -> go.Figure:
-    labels = _month_labels_for_okr(okr)
-    prev = [float(okr.meses[k].previsto) if k < len(okr.meses) else 0.0 for k in range(36)]
-    real = [float(okr.meses[k].realizado) if k < len(okr.meses) else 0.0 for k in range(36)]
+def fig_KPI_cumulative(KPI: KPI) -> go.Figure:
+    labels = _month_labels_for_KPI(KPI)
+    prev = [float(KPI.meses[k].previsto) if k < len(KPI.meses) else 0.0 for k in range(36)]
+    real = [float(KPI.meses[k].realizado) if k < len(KPI.meses) else 0.0 for k in range(36)]
     cum_p = np.cumsum(prev).tolist()
     cum_r = np.cumsum(real).tolist()
 
@@ -729,9 +729,9 @@ def fig_okr_cumulative(okr: OKR) -> go.Figure:
                              fill="tozeroy", fillcolor="rgba(0,137,123,0.1)"))
     return _fig_layout(fig, "Acumulado 36 meses", height=360)
 
-def fig_okr_gauge(okr: OKR) -> go.Figure:
-    prev_total = sum(m.previsto for m in okr.meses)
-    real_total = sum(m.realizado for m in okr.meses)
+def fig_KPI_gauge(KPI: KPI) -> go.Figure:
+    prev_total = sum(m.previsto for m in KPI.meses)
+    real_total = sum(m.realizado for m in KPI.meses)
     pct = (real_total / prev_total * 100) if prev_total > 0 else 0.0
     color = BK_GREEN if pct >= 95 else (BK_ORANGE if pct >= 70 else BK_RED)
     fig = go.Figure(go.Indicator(
@@ -750,7 +750,7 @@ def fig_okr_gauge(okr: OKR) -> go.Figure:
             ],
             "threshold": {"line": {"color": BK_BLUE, "width": 3}, "thickness": 0.75, "value": 100},
         },
-        title={"text": f"<b>% Realização</b><br><span style='font-size:11px'>{okr.nome[:40]}</span>",
+        title={"text": f"<b>% Realização</b><br><span style='font-size:11px'>{KPI.nome[:40]}</span>",
                "font": {"family": "Segoe UI", "size": 13}},
     ))
     fig.update_layout(height=260, margin=dict(l=20, r=20, t=40, b=10),
@@ -881,11 +881,11 @@ def fig_actions_timeline(planning: PlanningData) -> go.Figure:
     fig.update_yaxes(autorange="reversed", tickfont=dict(size=10))
     return _fig_layout(fig, "Linha do Tempo (Gantt)", height=max(300, len(rows) * 32 + 80), xangle=-30)
 
-def fig_okrs_overview(planning: PlanningData) -> go.Figure:
-    if not planning.okrs:
+def fig_KPIs_overview(planning: PlanningData) -> go.Figure:
+    if not planning.KPIs:
         return go.Figure()
     names, totals_prev, totals_real, pcts = [], [], [], []
-    for o in planning.okrs:
+    for o in planning.KPIs:
         tp = sum(m.previsto for m in o.meses)
         tr = sum(m.realizado for m in o.meses)
         names.append(o.nome[:25])
@@ -909,19 +909,19 @@ def fig_okrs_overview(planning: PlanningData) -> go.Figure:
                       paper_bgcolor="rgba(0,0,0,0)",
                       legend=dict(orientation="h", yanchor="bottom", y=1.02, x=0.5, xanchor="center"),
                       margin=dict(l=30, r=30, t=60, b=60),
-                      title=dict(text="OKRs — Visão Consolidada 36 meses",
+                      title=dict(text="KPIs — Visão Consolidada 36 meses",
                                  font=dict(size=15, color=BK_DARK)))
-    fig.update_yaxes(title_text="Valor (unidade OKR)", gridcolor="#E0E7EF", secondary_y=False)
+    fig.update_yaxes(title_text="Valor (unidade KPI)", gridcolor="#E0E7EF", secondary_y=False)
     fig.update_yaxes(title_text="% Realização", secondary_y=True)
     fig.update_xaxes(tickangle=-15, gridcolor="#E0E7EF")
     return fig
 
 
 # ============================================
-# HELPERS OKR
+# HELPERS KPI
 # ============================================
 
-def _month_labels_for_okr(o: OKR) -> List[str]:
+def _month_labels_for_KPI(o: KPI) -> List[str]:
     labels = []
     ano = int(getattr(o, "inicio_ano", date.today().year) or date.today().year)
     mes = int(getattr(o, "inicio_mes", date.today().month) or date.today().month)
@@ -931,23 +931,23 @@ def _month_labels_for_okr(o: OKR) -> List[str]:
         if mes > 12: mes, ano = 1, ano + 1
     return labels
 
-def _okr_meta_df(pl: PlanningData) -> pd.DataFrame:
+def _KPI_meta_df(pl: PlanningData) -> pd.DataFrame:
     rows = []
-    for i, o in enumerate(pl.okrs, start=1):
+    for i, o in enumerate(pl.KPIs, start=1):
         try: d0 = date(int(o.inicio_ano), int(o.inicio_mes), 1)
         except Exception: d0 = date.today().replace(day=1)
-        rows.append({"okr_id": i, "OKR": o.nome, "Área": o.area,
+        rows.append({"KPI_id": i, "KPI": o.nome, "Área": o.area,
                      "Unidade": o.unidade or "Inteiro", "Descrição": o.descricao,
                      "Início": d0, "Excluir": False})
-    df = pd.DataFrame(rows) if rows else pd.DataFrame(columns=["okr_id","OKR","Área","Unidade","Descrição","Início","Excluir"])
+    df = pd.DataFrame(rows) if rows else pd.DataFrame(columns=["KPI_id","KPI","Área","Unidade","Descrição","Início","Excluir"])
     return df
 
-def _sync_okrs_from_meta(pl: PlanningData, df_meta: pd.DataFrame) -> None:
-    existing_by_id = {i+1: pl.okrs[i] for i in range(len(pl.okrs))}
-    new_okrs: List[OKR] = []
+def _sync_KPIs_from_meta(pl: PlanningData, df_meta: pd.DataFrame) -> None:
+    existing_by_id = {i+1: pl.KPIs[i] for i in range(len(pl.KPIs))}
+    new_KPIs: List[KPI] = []
     for _, r in df_meta.iterrows():
         if bool(r.get("Excluir", False)): continue
-        nome = str(r.get("OKR","")).strip()
+        nome = str(r.get("KPI","")).strip()
         if not nome: continue
         area = str(r.get("Área","")).strip()
         unidade = str(r.get("Unidade","Inteiro")).strip()
@@ -957,7 +957,7 @@ def _sync_okrs_from_meta(pl: PlanningData, df_meta: pd.DataFrame) -> None:
             inicio_ano, inicio_mes = int(inicio.year), int(inicio.month)
         else:
             inicio_ano, inicio_mes = date.today().year, date.today().month
-        rid = r.get("okr_id", None)
+        rid = r.get("KPI_id", None)
         try: rid = int(rid)
         except Exception: rid = None
         if rid in existing_by_id:
@@ -972,32 +972,32 @@ def _sync_okrs_from_meta(pl: PlanningData, df_meta: pd.DataFrame) -> None:
                 for k in range(min(36, len(o.meses))):
                     o.meses[k].previsto = float(prev_vals[k]) if k < len(prev_vals) else 0.0
                     o.meses[k].realizado = float(real_vals[k]) if k < len(real_vals) else 0.0
-            new_okrs.append(o)
+            new_KPIs.append(o)
         else:
-            o = OKR(nome=nome, area=area, unidade=unidade, descricao=desc,
+            o = KPI(nome=nome, area=area, unidade=unidade, descricao=desc,
                     inicio_ano=inicio_ano, inicio_mes=inicio_mes)
             o.__post_init__()
-            new_okrs.append(o)
-    pl.okrs = new_okrs
+            new_KPIs.append(o)
+    pl.KPIs = new_KPIs
 
-def _okr_wide_df(pl: PlanningData, kind: str) -> pd.DataFrame:
+def _KPI_wide_df(pl: PlanningData, kind: str) -> pd.DataFrame:
     rows = []
-    for i, o in enumerate(pl.okrs, start=1):
-        r = {"OKR": o.nome, "okr_id": i, "Unidade": o.unidade or "Inteiro"}
+    for i, o in enumerate(pl.KPIs, start=1):
+        r = {"KPI": o.nome, "KPI_id": i, "Unidade": o.unidade or "Inteiro"}
         for k in range(36):
             col = f"M{k+1:02d}"
             val = getattr(o.meses[k], kind) if k < len(o.meses) else 0.0
             r[col] = float(val) if pd.notna(val) else 0.0
         rows.append(r)
-    cols = ["OKR","okr_id","Unidade"] + [f"M{k+1:02d}" for k in range(36)]
+    cols = ["KPI","KPI_id","Unidade"] + [f"M{k+1:02d}" for k in range(36)]
     return pd.DataFrame(rows, columns=cols) if rows else pd.DataFrame(columns=cols)
 
-def _apply_wide_to_okrs(pl: PlanningData, df_wide: pd.DataFrame, kind: str) -> None:
-    name_to_okr = {o.nome: o for o in pl.okrs}
+def _apply_wide_to_KPIs(pl: PlanningData, df_wide: pd.DataFrame, kind: str) -> None:
+    name_to_KPI = {o.nome: o for o in pl.KPIs}
     for _, r in df_wide.iterrows():
-        okr_name = str(r.get("OKR","")).strip()
-        if okr_name not in name_to_okr: continue
-        o = name_to_okr[okr_name]
+        KPI_name = str(r.get("KPI","")).strip()
+        if KPI_name not in name_to_KPI: continue
+        o = name_to_KPI[KPI_name]
         unit = (o.unidade or "Inteiro").strip()
         for k in range(36):
             col = f"M{k+1:02d}"
@@ -1021,7 +1021,7 @@ def format_brl(value: float) -> str:
     except Exception:
         return ""
 
-def generate_recommendations_for_okr(okr: OKR, df: pd.DataFrame) -> List[str]:
+def generate_recommendations_for_KPI(KPI: KPI, df: pd.DataFrame) -> List[str]:
     recs = []
     if df.empty: return ["Dados insuficientes para recomendações."]
     avg_prev = df['previsto'].mean() if not df['previsto'].isna().all() else 0
@@ -1034,10 +1034,10 @@ def generate_recommendations_for_okr(okr: OKR, df: pd.DataFrame) -> List[str]:
     elif pct < 0: recs.append("Leve subperformance. Reforçar acompanhamento semanal.")
     elif pct < 10: recs.append("Performance adequada. Padronizar processos e manter ritmo.")
     else: recs.append("Realizado acima do previsto — validar sustentabilidade e ajustar metas upward.")
-    recs.append("Alinhar OKR com planos de ação e responsáveis com datas claras.")
+    recs.append("Alinhar KPI com planos de ação e responsáveis com datas claras.")
     return recs
 
-def suggest_okrs_from_data(planning: PlanningData, top_n: int = 5) -> List[str]:
+def suggest_KPIs_from_data(planning: PlanningData, top_n: int = 5) -> List[str]:
     ideas = []
     areas = [a.area for a in planning.areas] if planning.areas else ["Comercial","Projetos Elétricos","Inovação e Tecnologia"]
     if any("forç" in s.tipo.lower() or "oportun" in s.tipo.lower() for s in planning.swot):
@@ -1079,7 +1079,7 @@ tr:hover td{background:#f8fafc;}
      flex:1;min-width:140px;text-align:center;}
 .kpi-val{font-size:24px;font-weight:700;color:#0369A1;}
 .kpi-label{font-size:11px;color:#64748B;margin-top:2px;}
-.okr-chart{text-align:center;margin:16px 0;}
+.KPI-chart{text-align:center;margin:16px 0;}
 .footer{text-align:center;padding:20px;font-size:12px;color:#94A3B8;
         border-top:1px solid #e2e8f0;margin-top:20px;}
 .rec-item{background:#EFF6FF;border-left:3px solid #1565C0;padding:8px 14px;
@@ -1096,8 +1096,8 @@ def build_html_report(planning: PlanningData) -> str:
 </div><div class="content">"""]
 
     # KPIs executivos
-    total_prev = sum(m.previsto for o in planning.okrs for m in o.meses)
-    total_real = sum(m.realizado for o in planning.okrs for m in o.meses)
+    total_prev = sum(m.previsto for o in planning.KPIs for m in o.meses)
+    total_real = sum(m.realizado for o in planning.KPIs for m in o.meses)
     pct_geral = (total_real / total_prev * 100) if total_prev > 0 else 0
     today = date.today()
     atrasados = sum(1 for a in planning.actions
@@ -1108,7 +1108,7 @@ def build_html_report(planning: PlanningData) -> str:
     parts.append(f"""<div class="card">
 <h2>🎯 Painel Executivo</h2>
 <div class="kpi-row">
-  <div class="kpi"><div class="kpi-val">{len(planning.okrs)}</div><div class="kpi-label">OKRs ativos</div></div>
+  <div class="kpi"><div class="kpi-val">{len(planning.KPIs)}</div><div class="kpi-label">KPIs ativos</div></div>
   <div class="kpi"><div class="kpi-val">{len(planning.actions)}</div><div class="kpi-label">Planos de ação</div></div>
   <div class="kpi"><div class="kpi-val">{concluidos}</div><div class="kpi-label">Planos concluídos</div></div>
   <div class="kpi"><div class="kpi-val" style="color:{'#DC2626' if atrasados else '#059669'}">{atrasados}</div><div class="kpi-label">Planos atrasados</div></div>
@@ -1154,19 +1154,19 @@ def build_html_report(planning: PlanningData) -> str:
                          f'<td>{s.descricao}</td></tr>')
         parts.append("</table></div>")
 
-    # OKRs
-    if planning.okrs:
-        parts.append('<div class="card"><h2>📈 OKRs (36 meses)</h2>')
+    # KPIs
+    if planning.KPIs:
+        parts.append('<div class="card"><h2>📈 KPIs (36 meses)</h2>')
         # Gráfico agregado
         try:
-            fig_agg = fig_okrs_overview(planning)
+            fig_agg = fig_KPIs_overview(planning)
             img = fig_agg.to_image(format="png", width=1100, height=400)
-            parts.append(f'<div class="okr-chart"><img src="data:image/png;base64,{base64.b64encode(img).decode()}" style="max-width:100%"/></div>')
+            parts.append(f'<div class="KPI-chart"><img src="data:image/png;base64,{base64.b64encode(img).decode()}" style="max-width:100%"/></div>')
         except Exception:
             pass
 
-        for o in planning.okrs:
-            df = okr_to_dataframe(o)
+        for o in planning.KPIs:
+            df = KPI_to_dataframe(o)
             tp = df['previsto'].sum(); tr = df['realizado'].sum()
             pct_o = (tr / tp * 100) if tp > 0 else 0
             parts.append(f'<h3>📊 {o.nome}</h3>')
@@ -1174,14 +1174,14 @@ def build_html_report(planning: PlanningData) -> str:
             if o.descricao: parts.append(f'<p style="margin:6px 0;font-size:13px">{o.descricao}</p>')
             # Gráfico mensal
             try:
-                fig_m = fig_okr_monthly(o)
+                fig_m = fig_KPI_monthly(o)
                 img_m = fig_m.to_image(format="png", width=1100, height=520)
-                parts.append(f'<div class="okr-chart"><img src="data:image/png;base64,{base64.b64encode(img_m).decode()}" style="max-width:100%"/></div>')
+                parts.append(f'<div class="KPI-chart"><img src="data:image/png;base64,{base64.b64encode(img_m).decode()}" style="max-width:100%"/></div>')
             except Exception:
                 pass
             # Tabela mensal
             parts.append('<table><tr><th>M#</th><th>Mês/Ano</th><th>Previsto</th><th>Realizado</th><th>Δ</th></tr>')
-            labels = _month_labels_for_okr(o)
+            labels = _month_labels_for_KPI(o)
             for i, m in enumerate(o.meses):
                 vp = format_brl(m.previsto) if "R$" in (o.unidade or "") else f"{m.previsto:,.2f}"
                 vr = format_brl(m.realizado) if "R$" in (o.unidade or "") else f"{m.realizado:,.2f}"
@@ -1192,7 +1192,7 @@ def build_html_report(planning: PlanningData) -> str:
                               f'<td style="color:{color};font-weight:600">{delta_str}</td></tr>')
             parts.append("</table>")
             # Recomendações
-            recs = generate_recommendations_for_okr(o, df)
+            recs = generate_recommendations_for_KPI(o, df)
             parts.append('<div style="margin-top:12px">')
             for rec in recs:
                 parts.append(f'<div class="rec-item">💡 {rec}</div>')
@@ -1205,7 +1205,7 @@ def build_html_report(planning: PlanningData) -> str:
         try:
             fig_st = fig_actions_status(planning)
             img_st = fig_st.to_image(format="png", width=600, height=320)
-            parts.append(f'<div class="okr-chart"><img src="data:image/png;base64,{base64.b64encode(img_st).decode()}" style="max-width:60%"/></div>')
+            parts.append(f'<div class="KPI-chart"><img src="data:image/png;base64,{base64.b64encode(img_st).decode()}" style="max-width:60%"/></div>')
         except Exception:
             pass
         parts.append('<table><tr><th>Título</th><th>Área</th><th>Responsável</th><th>Início</th><th>Vencimento</th><th>Status</th><th>Atraso</th></tr>')
@@ -1245,13 +1245,13 @@ def _actions_df(pl: PlanningData) -> pd.DataFrame:
             semaforo = "🟡"
         else:
             semaforo = "⚪"
-        rows.append({"": semaforo, "Título": a.titulo, "OKR": getattr(a,"okr",""),
+        rows.append({"": semaforo, "Título": a.titulo, "KPI": getattr(a,"KPI",""),
                      "Área": a.area, "Responsável": a.responsavel,
                      "Descrição": a.descricao, "Como Fazer": getattr(a,"como_fazer",""),
                      "Início": a.data_inicio if hasattr(a, "data_inicio") else "",
                      "Vencimento": a.data_vencimento, "Status": a.status,
                      "Status Efetivo": status_eff, "Observações": a.observacoes, "Excluir": False})
-    cols = ["","Título","OKR","Área","Responsável","Descrição","Como Fazer","Início","Vencimento","Status","Status Efetivo","Observações","Excluir"]
+    cols = ["","Título","KPI","Área","Responsável","Descrição","Como Fazer","Início","Vencimento","Status","Status Efetivo","Observações","Excluir"]
     return pd.DataFrame(rows, columns=cols) if rows else pd.DataFrame(columns=cols)
 
 def _sync_actions(pl: PlanningData, df: pd.DataFrame) -> None:
@@ -1287,7 +1287,7 @@ def _sync_actions(pl: PlanningData, df: pd.DataFrame) -> None:
             data_vencimento=_fmt_date(r.get("Vencimento")),
             status=str(r.get("Status","Pendente")).strip(),
             observacoes=str(r.get("Observações","")).strip(),
-            okr=str(r.get("OKR","")).strip(),
+            KPI=str(r.get("KPI","")).strip(),
             como_fazer=str(r.get("Como Fazer","")).strip(),
         ))
     pl.actions = new_actions
@@ -1512,8 +1512,8 @@ with st.sidebar:
         st.caption("☁️ Neon: 🔴 offline")
 
     st.markdown("---")
-    st.markdown("## 💡 Sugestões de OKRs")
-    for i, item in enumerate(suggest_okrs_from_data(planning), 1):
+    st.markdown("## 💡 Sugestões de KPIs")
+    for i, item in enumerate(suggest_KPIs_from_data(planning), 1):
         st.caption(f"{i}. {item}")
 
 
@@ -1522,8 +1522,8 @@ with st.sidebar:
 # ============================================
 
 today = date.today()
-total_prev_geral = sum(m.previsto for o in planning.okrs for m in o.meses)
-total_real_geral = sum(m.realizado for o in planning.okrs for m in o.meses)
+total_prev_geral = sum(m.previsto for o in planning.KPIs for m in o.meses)
+total_real_geral = sum(m.realizado for o in planning.KPIs for m in o.meses)
 pct_real_geral = (total_real_geral / total_prev_geral * 100) if total_prev_geral > 0 else 0
 n_atrasados = sum(1 for a in planning.actions
                   if a.status != "Concluído" and _safe_date(a.data_vencimento)
@@ -1537,7 +1537,7 @@ def kpi_html(val, label, color="#1565C0"):
     <div class="val" style="color:{color}">{val}</div>
     <div class="lbl">{label}</div></div>"""
 
-col1.markdown(kpi_html(len(planning.okrs), "OKRs"), unsafe_allow_html=True)
+col1.markdown(kpi_html(len(planning.KPIs), "KPIs"), unsafe_allow_html=True)
 col2.markdown(kpi_html(f"{pct_real_geral:.1f}%", "Realização Geral",
               BK_GREEN if pct_real_geral >= 90 else (BK_ORANGE if pct_real_geral >= 70 else BK_RED)), unsafe_allow_html=True)
 col3.markdown(kpi_html(len(planning.actions), "Planos de Ação"), unsafe_allow_html=True)
@@ -1557,7 +1557,7 @@ tabs = st.tabs([
     "🧭 Estratégia",
     "🏢 Áreas",
     "⚖️ SWOT",
-    "📈 OKRs",
+    "📈 KPIs",
     "✅ Planos de Ação",
     "📄 Relatórios"
 ])
@@ -1567,18 +1567,18 @@ tabs = st.tabs([
 with tabs[0]:
     st.markdown('<div class="section-title">Visão Geral Executiva</div>', unsafe_allow_html=True)
 
-    if planning.okrs:
-        fig_ov = fig_okrs_overview(planning)
-        st.plotly_chart(fig_ov, use_container_width=True, key="dash_okr_overview")
+    if planning.KPIs:
+        fig_ov = fig_KPIs_overview(planning)
+        st.plotly_chart(fig_ov, use_container_width=True, key="dash_KPI_overview")
 
-        # Gauges de OKRs
-        st.markdown("**Performance por OKR**")
-        gauge_cols = st.columns(min(len(planning.okrs), 4))
-        for i, o in enumerate(planning.okrs[:4]):
+        # Gauges de KPIs
+        st.markdown("**Performance por KPI**")
+        gauge_cols = st.columns(min(len(planning.KPIs), 4))
+        for i, o in enumerate(planning.KPIs[:4]):
             with gauge_cols[i % 4]:
-                st.plotly_chart(fig_okr_gauge(o), use_container_width=True, key=f"dash_gauge_{i}")
+                st.plotly_chart(fig_KPI_gauge(o), use_container_width=True, key=f"dash_gauge_{i}")
     else:
-        st.info("Cadastre OKRs na aba **📈 OKRs** para visualizar o dashboard.")
+        st.info("Cadastre KPIs na aba **📈 KPIs** para visualizar o dashboard.")
 
     c1, c2 = st.columns(2)
     with c1:
@@ -1666,7 +1666,7 @@ with tabs[1]:
 # ══════════════ TAB 2: ESTRATÉGIA ══════════════
 with tabs[2]:
     st.markdown('<div class="section-title">🧭 Informações Estratégicas</div>', unsafe_allow_html=True)
-    st.caption("O 'norte' da empresa. Alimenta relatórios e dá coerência a OKRs e planos de ação.")
+    st.caption("O 'norte' da empresa. Alimenta relatórios e dá coerência a KPIs e planos de ação.")
     s = planning.strategic
 
     colA, colB = st.columns(2)
@@ -1682,7 +1682,7 @@ with tabs[2]:
         s.pilares         = st.text_area("🏛️ Pilares estratégicos (3–6)", value=s.pilares, height=100, key="s_pil")
 
     s.objetivos_estrategicos = st.text_area("📋 Objetivos estratégicos (alto nível)", value=s.objetivos_estrategicos, height=120, key="s_obj")
-    s.notas = st.text_area("📝 Notas / hipóteses / restrições", value=s.notas, height=80, key="s_not")
+    s.notas = st.text_area("📝 OKR's / hipóteses / restrições", value=s.notas, height=80, key="s_not")
 
     if st.button("💾 Salvar Estratégia", key="s_save", type="primary"):
         planning.strategic = s
@@ -1694,7 +1694,7 @@ with tabs[2]:
 - **Visão**: verbo + impacto + prazo. Ex.: *"Ser referência regional em engenharia elétrica industrial até 2029"*
 - **Missão**: público + entrega + diferencial. Ex.: *"Ajudar indústrias a reduzir custos com projetos elétricos seguros e inovadores"*
 - **Pilares**: 4–6 temas. Ex.: Crescimento Comercial, Excelência Técnica, Inovação/BIM, Pessoas, Sustentabilidade
-- **Objetivos**: conecte diretamente com seus OKRs: cada objetivo deve ter pelo menos 1 OKR mensurável
+- **Objetivos**: conecte diretamente com seus KPIs: cada objetivo deve ter pelo menos 1 KPI mensurável
         """)
 
 
@@ -1825,23 +1825,23 @@ with tabs[4]:
             st.markdown(" ".join([f"**{t}**: {c}" for t, c in counts.items()]))
 
 
-# ══════════════ TAB 5: OKRs ══════════════
+# ══════════════ TAB 5: KPIs ══════════════
 with tabs[5]:
-    st.markdown('<div class="section-title">📈 OKRs — Objetivos e Resultados-Chave (36 meses)</div>', unsafe_allow_html=True)
-    st.caption("1) Cadastre OKRs na tabela de metadados. 2) Preencha Previsto e Realizado. 3) Analise gráficos e indicadores.")
+    st.markdown('<div class="section-title">📈 KPIs — Objetivos e Resultados-Chave (36 meses)</div>', unsafe_allow_html=True)
+    st.caption("1) Cadastre KPIs na tabela de metadados. 2) Preencha Previsto e Realizado. 3) Analise gráficos e indicadores.")
 
-    # ---- Cadastro de OKRs ----
-    with st.expander("➕ **Cadastro e Gestão de OKRs** (clique para expandir)", expanded=True):
-        df_meta = _okr_meta_df(planning)
+    # ---- Cadastro de KPIs ----
+    with st.expander("➕ **Cadastro e Gestão de KPIs** (clique para expandir)", expanded=True):
+        df_meta = _KPI_meta_df(planning)
         unidade_opts = ["R$", "%", "Inteiro", "horas", "projetos", "clientes", "NPS"]
 
         st.caption("Edite diretamente. Adicione novas linhas pelo botão '+'. Marque **Excluir** para remover.")
         edited_meta = try_data_editor(
-            df_meta, key="okr_meta_editor", height=280, use_container_width=True,
-            disabled=["okr_id"],
+            df_meta, key="KPI_meta_editor", height=280, use_container_width=True,
+            disabled=["KPI_id"],
             column_config={
-                "okr_id": st.column_config.NumberColumn("ID", width="small"),
-                "OKR": st.column_config.TextColumn("Nome da OKR", width="large"),
+                "KPI_id": st.column_config.NumberColumn("ID", width="small"),
+                "KPI": st.column_config.TextColumn("Nome da KPI", width="large"),
                 "Área": st.column_config.TextColumn("Área", width="medium"),
                 "Unidade": st.column_config.SelectboxColumn("Unidade", options=unidade_opts, required=True, width="small"),
                 "Descrição": st.column_config.TextColumn("Descrição", width="large"),
@@ -1851,40 +1851,40 @@ with tabs[5]:
         )
         c_m1, c_m2 = st.columns([1, 3])
         with c_m1:
-            if st.button("💾 Aplicar OKRs", key="okr_meta_apply", type="primary"):
+            if st.button("💾 Aplicar KPIs", key="KPI_meta_apply", type="primary"):
                 if edited_meta is not None:
-                    _sync_okrs_from_meta(planning, edited_meta)
+                    _sync_KPIs_from_meta(planning, edited_meta)
                     save_planning(planning)
-                    st.success("OKRs atualizadas!")
+                    st.success("KPIs atualizadas!")
                     st.rerun()
         with c_m2:
-            st.info("Dica: Crie uma nova linha em branco para adicionar uma OKR. Salve após editar.")
+            st.info("Dica: Crie uma nova linha em branco para adicionar uma KPI. Salve após editar.")
 
-    if not planning.okrs:
-        st.warning("⚠️ Cadastre ao menos 1 OKR para liberar as tabelas de Previsto/Realizado e os gráficos.")
+    if not planning.KPIs:
+        st.warning("⚠️ Cadastre ao menos 1 KPI para liberar as tabelas de Previsto/Realizado e os gráficos.")
         st.stop()
 
-    okr_names = [o.nome for o in planning.okrs]
+    KPI_names = [o.nome for o in planning.KPIs]
 
     # ---- Previsto ----
     with st.expander("📋 **Planejado (Previsto) — 36 meses**", expanded=False):
-        st.caption("Colunas M01..M36 = meses a partir do Início de cada OKR. Edite os valores diretamente.")
-        df_prev = _okr_wide_df(planning, "previsto")
+        st.caption("Colunas M01..M36 = meses a partir do Início de cada KPI. Edite os valores diretamente.")
+        df_prev = _KPI_wide_df(planning, "previsto")
         month_cols_prev = {f"M{k+1:02d}": st.column_config.NumberColumn(f"M{k+1:02d}", format="%.2f", step=0.01)
                            for k in range(36)}
         edited_prev = try_data_editor(
-            df_prev, key="okr_prev_editor", height=320, use_container_width=True,
+            df_prev, key="KPI_prev_editor", height=320, use_container_width=True,
             num_rows="dynamic",
-            disabled=["okr_id","Unidade"],
+            disabled=["KPI_id","Unidade"],
             column_config={
-                "OKR": st.column_config.SelectboxColumn("OKR", options=okr_names, required=True),
+                "KPI": st.column_config.SelectboxColumn("KPI", options=KPI_names, required=True),
                 "Unidade": st.column_config.TextColumn("Unidade", width="small"),
                 **month_cols_prev
             }
         )
-        if st.button("💾 Salvar Planejado", key="okr_prev_save", type="primary"):
+        if st.button("💾 Salvar Planejado", key="KPI_prev_save", type="primary"):
             if edited_prev is not None:
-                _apply_wide_to_okrs(planning, edited_prev, "previsto")
+                _apply_wide_to_KPIs(planning, edited_prev, "previsto")
                 save_planning(planning)
                 st.success("Planejado salvo!")
                 st.rerun()
@@ -1892,59 +1892,59 @@ with tabs[5]:
     # ---- Realizado ----
     with st.expander("📊 **Realizado — 36 meses**", expanded=False):
         st.caption("Preencha conforme o realizado mês a mês.")
-        df_real = _okr_wide_df(planning, "realizado")
+        df_real = _KPI_wide_df(planning, "realizado")
         month_cols_real = {f"M{k+1:02d}": st.column_config.NumberColumn(f"M{k+1:02d}", format="%.2f", step=0.01)
                            for k in range(36)}
         edited_real = try_data_editor(
-            df_real, key="okr_real_editor", height=320, use_container_width=True,
+            df_real, key="KPI_real_editor", height=320, use_container_width=True,
             num_rows="dynamic",
-            disabled=["okr_id","Unidade"],
+            disabled=["KPI_id","Unidade"],
             column_config={
-                "OKR": st.column_config.SelectboxColumn("OKR", options=okr_names, required=True),
+                "KPI": st.column_config.SelectboxColumn("KPI", options=KPI_names, required=True),
                 "Unidade": st.column_config.TextColumn("Unidade", width="small"),
                 **month_cols_real
             }
         )
-        if st.button("💾 Salvar Realizado", key="okr_real_save", type="primary"):
+        if st.button("💾 Salvar Realizado", key="KPI_real_save", type="primary"):
             if edited_real is not None:
-                _apply_wide_to_okrs(planning, edited_real, "realizado")
+                _apply_wide_to_KPIs(planning, edited_real, "realizado")
                 save_planning(planning)
                 st.success("Realizado salvo!")
                 st.rerun()
 
-    # ---- Análise por OKR ----
+    # ---- Análise por KPI ----
     st.markdown("---")
-    st.markdown("### 🔍 Análise Detalhada por OKR")
+    st.markdown("### 🔍 Análise Detalhada por KPI")
 
-    sel_okr = st.selectbox("Selecionar OKR para análise", options=okr_names, key="okr_sel_analysis")
-    okr_obj = next((o for o in planning.okrs if o.nome == sel_okr), None)
+    sel_KPI = st.selectbox("Selecionar KPI para análise", options=KPI_names, key="KPI_sel_analysis")
+    KPI_obj = next((o for o in planning.KPIs if o.nome == sel_KPI), None)
 
-    if okr_obj:
-        labels = _month_labels_for_okr(okr_obj)
-        prev = [float(okr_obj.meses[k].previsto) if k < len(okr_obj.meses) else 0.0 for k in range(36)]
-        real = [float(okr_obj.meses[k].realizado) if k < len(okr_obj.meses) else 0.0 for k in range(36)]
+    if KPI_obj:
+        labels = _month_labels_for_KPI(KPI_obj)
+        prev = [float(KPI_obj.meses[k].previsto) if k < len(KPI_obj.meses) else 0.0 for k in range(36)]
+        real = [float(KPI_obj.meses[k].realizado) if k < len(KPI_obj.meses) else 0.0 for k in range(36)]
 
-        # KPIs da OKR
-        tp_okr = sum(prev); tr_okr = sum(real)
-        pct_okr = (tr_okr / tp_okr * 100) if tp_okr > 0 else 0
+        # KPIs da KPI
+        tp_KPI = sum(prev); tr_KPI = sum(real)
+        pct_KPI = (tr_KPI / tp_KPI * 100) if tp_KPI > 0 else 0
         ks = st.columns(4)
-        ks[0].metric("Total Planejado", f"{tp_okr:,.2f}", help=f"Unidade: {okr_obj.unidade}")
-        ks[1].metric("Total Realizado", f"{tr_okr:,.2f}", help=f"Unidade: {okr_obj.unidade}")
-        ks[2].metric("Diferença", f"{tr_okr - tp_okr:+,.2f}")
-        ks[3].metric("% Realização", f"{pct_okr:.1f}%",
-                     delta=f"{pct_okr - 100:.1f}%",
-                     delta_color="normal" if pct_okr >= 100 else "inverse")
+        ks[0].metric("Total Planejado", f"{tp_KPI:,.2f}", help=f"Unidade: {KPI_obj.unidade}")
+        ks[1].metric("Total Realizado", f"{tr_KPI:,.2f}", help=f"Unidade: {KPI_obj.unidade}")
+        ks[2].metric("Diferença", f"{tr_KPI - tp_KPI:+,.2f}")
+        ks[3].metric("% Realização", f"{pct_KPI:.1f}%",
+                     delta=f"{pct_KPI - 100:.1f}%",
+                     delta_color="normal" if pct_KPI >= 100 else "inverse")
 
         # Gauge
         cg, _ = st.columns([1, 3])
         with cg:
-            st.plotly_chart(fig_okr_gauge(okr_obj), use_container_width=True, key="okr_tab_gauge")
+            st.plotly_chart(fig_KPI_gauge(KPI_obj), use_container_width=True, key="KPI_tab_gauge")
 
         # Gráfico mensal
-        st.plotly_chart(fig_okr_monthly(okr_obj), use_container_width=True, key="okr_tab_monthly")
+        st.plotly_chart(fig_KPI_monthly(KPI_obj), use_container_width=True, key="KPI_tab_monthly")
 
         # Acumulado
-        st.plotly_chart(fig_okr_cumulative(okr_obj), use_container_width=True, key="okr_tab_cumulative")
+        st.plotly_chart(fig_KPI_cumulative(KPI_obj), use_container_width=True, key="KPI_tab_cumulative")
 
         # Tabela de comparação
         st.markdown("**📋 Tabela Comparativa Mensal**")
@@ -1980,12 +1980,12 @@ with tabs[6]:
     with st.expander("➕ **Adicionar novo Plano de Ação**", expanded=False):
         area_opts  = [a.area for a in planning.areas]  if planning.areas   else []
         resp_opts  = [p.nome for p in planning.partners] if planning.partners else []
-        okr_opts   = [o.nome for o in planning.okrs]   if planning.okrs    else []
+        KPI_opts   = [o.nome for o in planning.KPIs]   if planning.KPIs    else []
 
         fa1, fa2, fa3 = st.columns(3)
         novo_titulo = fa1.text_input("Título *", key="na_titulo")
-        novo_okr    = fa2.selectbox("OKR vinculada", options=["(nenhuma)"] + okr_opts, key="na_okr") if okr_opts \
-                      else fa2.text_input("OKR vinculada", key="na_okr_txt")
+        novo_KPI    = fa2.selectbox("KPI vinculada", options=["(nenhuma)"] + KPI_opts, key="na_KPI") if KPI_opts \
+                      else fa2.text_input("KPI vinculada", key="na_KPI_txt")
         novo_area   = fa3.selectbox("Área", options=area_opts + ["(outra)"], key="na_area") if area_opts \
                       else fa3.text_input("Área", key="na_area_txt")
 
@@ -2008,7 +2008,7 @@ with tabs[6]:
             else:
                 area_val = novo_area if area_opts and novo_area != "(outra)" else st.session_state.get("na_area_txt","")
                 resp_val = novo_resp if resp_opts and novo_resp != "(outro)" else st.session_state.get("na_resp_txt","")
-                okr_val  = novo_okr if okr_opts and novo_okr != "(nenhuma)" else st.session_state.get("na_okr_txt","")
+                KPI_val  = novo_KPI if KPI_opts and novo_KPI != "(nenhuma)" else st.session_state.get("na_KPI_txt","")
                 planning.actions.append(PlanoAcao(
                     titulo=novo_titulo.strip(),
                     area=area_val,
@@ -2018,7 +2018,7 @@ with tabs[6]:
                     data_vencimento=novo_venc.strftime("%Y-%m-%d"),
                     status=novo_status,
                     observacoes=novo_obs.strip(),
-                    okr=okr_val,
+                    KPI=KPI_val,
                     como_fazer=novo_como.strip(),
                 ))
                 save_planning(planning)
@@ -2041,7 +2041,7 @@ with tabs[6]:
 
     # Montar column_config com dropdowns dinâmicos
     _act_area_opts = [a.area for a in planning.areas] if planning.areas else None
-    _act_okr_opts  = [o.nome for o in planning.okrs] if planning.okrs else None
+    _act_KPI_opts  = [o.nome for o in planning.KPIs] if planning.KPIs else None
     _act_resp_opts = [p.nome for p in planning.partners] if planning.partners else None
 
     _act_col_config = {
@@ -2060,9 +2060,9 @@ with tabs[6]:
     if _act_area_opts:
         _act_col_config["Área"] = st.column_config.SelectboxColumn(
             "Área", options=_act_area_opts, width="medium")
-    if _act_okr_opts:
-        _act_col_config["OKR"] = st.column_config.SelectboxColumn(
-            "OKR", options=_act_okr_opts, width="medium")
+    if _act_KPI_opts:
+        _act_col_config["KPI"] = st.column_config.SelectboxColumn(
+            "KPI", options=_act_KPI_opts, width="medium")
     if _act_resp_opts:
         _act_col_config["Responsável"] = st.column_config.SelectboxColumn(
             "Responsável", options=_act_resp_opts, width="medium")
@@ -2147,18 +2147,18 @@ with tabs[7]:
 
     st.markdown("---")
 
-    # Sinais de execução OKRs
-    if planning.okrs:
-        st.markdown("#### 📈 Saúde das OKRs")
+    # Sinais de execução KPIs
+    if planning.KPIs:
+        st.markdown("#### 📈 Saúde das KPIs")
         rows = []
-        for o in planning.okrs:
+        for o in planning.KPIs:
             real_vals = [m.realizado for m in o.meses[:36]]
             prev_vals = [m.previsto  for m in o.meses[:36]]
             filled = sum(1 for v in real_vals if float(v) != 0.0)
             tp = sum(prev_vals); tr = sum(real_vals)
             pct = (tr / tp * 100) if tp > 0 else 0
             semaforo = "🟢" if pct >= 95 else ("🟡" if pct >= 70 else "🔴")
-            rows.append({"": semaforo, "OKR": o.nome, "Área": o.area, "Unidade": o.unidade,
+            rows.append({"": semaforo, "KPI": o.nome, "Área": o.area, "Unidade": o.unidade,
                          "% Realização": f"{pct:.1f}%",
                          "Meses preenchidos": f"{filled}/36 ({filled/36*100:.0f}%)"})
         st.dataframe(pd.DataFrame(rows), use_container_width=True, height=200, hide_index=True)
@@ -2172,18 +2172,18 @@ with tabs[7]:
         opps    = [s for s in planning.swot if s.tipo == "Oportunidade" and s.prioridade == "Alta"]
         weaknesses = [s for s in planning.swot if s.tipo == "Fraqueza" and s.prioridade == "Alta"]
         if threats:    recs.append(f"🔴 {len(threats)} **Ameaça(s) Alta** — crie planos de mitigação com responsável e prazo claro.")
-        if opps:       recs.append(f"🔵 {len(opps)} **Oportunidade(s) Alta** — transforme em 1–2 OKRs por pilar estratégico.")
+        if opps:       recs.append(f"🔵 {len(opps)} **Oportunidade(s) Alta** — transforme em 1–2 KPIs por pilar estratégico.")
         if weaknesses: recs.append(f"🟡 {len(weaknesses)} **Fraqueza(s) Alta** — endereçar com planos de ação de curto prazo.")
     if n_atrasados:
         recs.append(f"⚠️ **{n_atrasados} plano(s) atrasado(s)** — priorize replanejamento: escopo, capacidade, nova data.")
-    if planning.okrs:
-        recs.append("📅 Estabeleça **revisão mensal** do realizado e **revisão trimestral** de OKRs e prioridades.")
-        low_fill = [o.nome for o in planning.okrs
+    if planning.KPIs:
+        recs.append("📅 Estabeleça **revisão mensal** do realizado e **revisão trimestral** de KPIs e prioridades.")
+        low_fill = [o.nome for o in planning.KPIs
                     if sum(1 for m in o.meses if m.realizado != 0) < 3]
         if low_fill:
-            recs.append(f"📊 OKR(s) com pouco histórico: **{', '.join(low_fill[:3])}** — preencha o realizado mensalmente.")
+            recs.append(f"📊 KPI(s) com pouco histórico: **{', '.join(low_fill[:3])}** — preencha o realizado mensalmente.")
     if not recs:
-        recs.append("✅ Preencha Visão/Missão, SWOT e OKRs para gerar recomendações automáticas.")
+        recs.append("✅ Preencha Visão/Missão, SWOT e KPIs para gerar recomendações automáticas.")
 
     for r in recs:
         st.markdown(f"- {r}")
