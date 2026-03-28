@@ -45,7 +45,7 @@ def load_planning_json(path: str = "planning.json") -> Dict[str, Any]:
         "swot": [
             {"tipo":"Força","descricao":"Alta capacidade técnica","prioridade":"Alta"}
         ],
-        "okrs": [
+        "KPIs": [
             {
                 "nome":"Aumentar faturamento",
                 "area":"Comercial",
@@ -69,9 +69,9 @@ def load_planning_json(path: str = "planning.json") -> Dict[str, Any]:
     }
     return example
 
-def okr_to_df(okr: Dict[str, Any]) -> pd.DataFrame:
+def KPI_to_df(KPI: Dict[str, Any]) -> pd.DataFrame:
     rows = []
-    meses = okr.get("meses", [])
+    meses = KPI.get("meses", [])
     for i, m in enumerate(meses, start=1):
         rows.append({
             "m_index": i,
@@ -87,11 +87,11 @@ def planning_to_dfs(planning: Dict[str, Any]) -> Dict[str, pd.DataFrame]:
     areas = pd.DataFrame(planning.get("areas", []))
     swot = pd.DataFrame(planning.get("swot", []))
     actions = pd.DataFrame(planning.get("actions", []))
-    okr_rows = []
-    okr_mes_rows = []
-    for idx, o in enumerate(planning.get("okrs", []), start=1):
-        okr_rows.append({
-            "okr_id": idx,
+    KPI_rows = []
+    KPI_mes_rows = []
+    for idx, o in enumerate(planning.get("KPIs", []), start=1):
+        KPI_rows.append({
+            "KPI_id": idx,
             "nome": o.get("nome"),
             "area": o.get("area"),
             "unidade": o.get("unidade"),
@@ -100,22 +100,22 @@ def planning_to_dfs(planning: Dict[str, Any]) -> Dict[str, pd.DataFrame]:
             "inicio_mes": o.get("inicio_mes")
         })
         for i, m in enumerate(o.get("meses", []), start=1):
-            okr_mes_rows.append({
-                "okr_id": idx,
+            KPI_mes_rows.append({
+                "KPI_id": idx,
                 "idx_mes": i,
                 "ano": m.get("ano"),
                 "mes": m.get("mes"),
                 "previsto": float(m.get("previsto", 0.0)),
                 "realizado": float(m.get("realizado", 0.0))
             })
-    okrs = pd.DataFrame(okr_rows) if okr_rows else pd.DataFrame(columns=["okr_id","nome","area","unidade","descricao","inicio_ano","inicio_mes"])
-    okr_mes = pd.DataFrame(okr_mes_rows) if okr_mes_rows else pd.DataFrame(columns=["okr_id","idx_mes","ano","mes","previsto","realizado"])
+    KPIs = pd.DataFrame(KPI_rows) if KPI_rows else pd.DataFrame(columns=["KPI_id","nome","area","unidade","descricao","inicio_ano","inicio_mes"])
+    KPI_mes = pd.DataFrame(KPI_mes_rows) if KPI_mes_rows else pd.DataFrame(columns=["KPI_id","idx_mes","ano","mes","previsto","realizado"])
     return {
         "partners": partners,
         "areas": areas,
         "swot": swot,
-        "okrs": okrs,
-        "okr_mes": okr_mes,
+        "KPIs": KPIs,
+        "KPI_mes": KPI_mes,
         "actions": actions
     }
 
@@ -123,13 +123,13 @@ def planning_to_dfs(planning: Dict[str, Any]) -> Dict[str, pd.DataFrame]:
 # Gráficos (plotly -> PNG bytes)
 # -------------------------
 
-def fig_okrs_aggregated(okrs_df: pd.DataFrame, okr_mes_df: pd.DataFrame) -> bytes:
+def fig_KPIs_aggregated(KPIs_df: pd.DataFrame, KPI_mes_df: pd.DataFrame) -> bytes:
     labels = []
     totals_prev = []
     totals_real = []
-    for _, row in okrs_df.iterrows():
-        okr_id = row["okr_id"]
-        dfm = okr_mes_df[okr_mes_df["okr_id"] == okr_id]
+    for _, row in KPIs_df.iterrows():
+        KPI_id = row["KPI_id"]
+        dfm = KPI_mes_df[KPI_mes_df["KPI_id"] == KPI_id]
         tp = float(dfm["previsto"].sum())
         tr = float(dfm["realizado"].sum())
         labels.append(row["nome"])
@@ -144,13 +144,13 @@ def fig_okrs_aggregated(okrs_df: pd.DataFrame, okr_mes_df: pd.DataFrame) -> byte
     img = fig.to_image(format="png", width=1100, height=360)
     return img
 
-def fig_okr_monthly(okr_df: pd.DataFrame) -> bytes:
-    # okr_df must have columns: m_index, previsto, realizado
+def fig_KPI_monthly(KPI_df: pd.DataFrame) -> bytes:
+    # KPI_df must have columns: m_index, previsto, realizado
     fig = go.Figure()
-    fig.add_trace(go.Bar(x=okr_df["m_index"], y=okr_df["previsto"], name="Previsto", marker_color="#4c8cff"))
-    fig.add_trace(go.Bar(x=okr_df["m_index"], y=okr_df["realizado"], name="Realizado", marker_color="#42b983"))
-    y = okr_df["realizado"].values
-    x = okr_df["m_index"].values
+    fig.add_trace(go.Bar(x=KPI_df["m_index"], y=KPI_df["previsto"], name="Previsto", marker_color="#4c8cff"))
+    fig.add_trace(go.Bar(x=KPI_df["m_index"], y=KPI_df["realizado"], name="Realizado", marker_color="#42b983"))
+    y = KPI_df["realizado"].values
+    x = KPI_df["m_index"].values
     if np.count_nonzero(y) >= 3:
         z = np.polyfit(x, y, 1)
         p = np.poly1d(z)
@@ -267,25 +267,25 @@ def generate_docx(planning_data: Dict[str, Any], output_path: str = "relatorio_p
     add_heading(doc, "SWOT", level=2)
     add_table_from_df(doc, dfs["swot"])
 
-    # OKRs aggregated
-    add_heading(doc, "OKRs (3 anos) - Visão Geral", level=2)
-    if not dfs["okrs"].empty:
+    # KPIs aggregated
+    add_heading(doc, "KPIs (3 anos) - Visão Geral", level=2)
+    if not dfs["KPIs"].empty:
         try:
-            agg_img = fig_okrs_aggregated(dfs["okrs"], dfs["okr_mes"])
+            agg_img = fig_KPIs_aggregated(dfs["KPIs"], dfs["KPI_mes"])
             insert_image_bytes(doc, agg_img, width_inches=6.5)
         except Exception as e:
             add_paragraph(doc, f"Erro ao gerar gráfico agregado: {e}", size=10)
     else:
-        add_paragraph(doc, "Nenhuma OKR cadastrada.", size=10)
+        add_paragraph(doc, "Nenhuma KPI cadastrada.", size=10)
 
-    # Per-OKR details
-    for _, okr_row in dfs["okrs"].iterrows():
-        okr_id = okr_row["okr_id"]
-        add_heading(doc, f"OKR: {okr_row['nome']}", level=3)
-        add_paragraph(doc, f"Área: {okr_row.get('area','')}. Unidade: {okr_row.get('unidade','')}. Início: {int(okr_row.get('inicio_mes',1)):02d}/{okr_row.get('inicio_ano','')}", size=10)
-        if okr_row.get("descricao"):
-            add_paragraph(doc, okr_row["descricao"], size=10)
-        dfm = dfs["okr_mes"][dfs["okr_mes"]["okr_id"] == okr_id].copy().sort_values("idx_mes")
+    # Per-KPI details
+    for _, KPI_row in dfs["KPIs"].iterrows():
+        KPI_id = KPI_row["KPI_id"]
+        add_heading(doc, f"KPI: {KPI_row['nome']}", level=3)
+        add_paragraph(doc, f"Área: {KPI_row.get('area','')}. Unidade: {KPI_row.get('unidade','')}. Início: {int(KPI_row.get('inicio_mes',1)):02d}/{KPI_row.get('inicio_ano','')}", size=10)
+        if KPI_row.get("descricao"):
+            add_paragraph(doc, KPI_row["descricao"], size=10)
+        dfm = dfs["KPI_mes"][dfs["KPI_mes"]["KPI_id"] == KPI_id].copy().sort_values("idx_mes")
         if dfm.empty:
             add_paragraph(doc, "(nenhum mês cadastrado)", size=10)
             continue
@@ -294,7 +294,7 @@ def generate_docx(planning_data: Dict[str, Any], output_path: str = "relatorio_p
         add_table_from_df(doc, dfm_display)
         # chart
         try:
-            img = fig_okr_monthly(dfm)
+            img = fig_KPI_monthly(dfm)
             insert_image_bytes(doc, img, width_inches=6.5)
         except Exception as e:
             add_paragraph(doc, f"Erro ao gerar gráfico mensal: {e}", size=10)
@@ -315,7 +315,7 @@ def generate_docx(planning_data: Dict[str, Any], output_path: str = "relatorio_p
                     recs.append("Performance adequada. Padronizar processos.")
                 else:
                     recs.append("Realizado acima do previsto — validar sustentabilidade e ajustar metas se necessário.")
-                recs.append("Alinhar OKR com planos de ação e responsáveis com datas claras.")
+                recs.append("Alinhar KPI com planos de ação e responsáveis com datas claras.")
             add_paragraph(doc, "Recomendações:", bold=True)
             for r in recs:
                 add_paragraph(doc, f"- {r}", size=10)
